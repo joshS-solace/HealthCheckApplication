@@ -28,22 +28,6 @@ llm keys set anthropic
 # Enter your Anthropic API key when prompted
 ```
 
-### Atlassian Credentials (used by raw API fallback)
-
-**Windows CMD**
-```cmd
-setx ATLASSIAN_TOKEN "your-atlassian-api-token"
-setx ATLASSIAN_EMAIL "your-email@example.com"
-```
-
-**PowerShell (persistent)**
-```powershell
-[System.Environment]::SetEnvironmentVariable("ATLASSIAN_TOKEN", "your-atlassian-api-token", "User")
-[System.Environment]::SetEnvironmentVariable("ATLASSIAN_EMAIL", "your-email@example.com",   "User")
-```
-
-Generate an Atlassian API token at: https://id.atlassian.com/manage-profile/security/api-tokens
-
 ---
 
 ## Atlassian MCP (Confluence Search)
