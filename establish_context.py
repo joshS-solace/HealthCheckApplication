@@ -87,7 +87,10 @@ def extract_context(folder: Path) -> dict:
     if router_name == "Unknown":
         router_name = first_match(r"Router Name\s*:\s*(\S+)", diagnostics)
 
-    serial = first_match(r"Chassis serial:\s*(\S+)", hardware_out)
+    serial           = first_match(r"Chassis serial:\s*(\S+)", hardware_out)
+    chassis_product  = first_match(r"Chassis Product #:\s*(\S+)", hardware_out, default="")
+    version_out      = extract_command_output(diagnostics, "show version")
+    solos_version    = first_match(r"Solace PubSub\+.*?Version\s+(\S+)", version_out, default="")
 
     redundancy_config   = first_match(r"Configuration Status[ \t]*:[ \t]*(\S+)", redundancy_out)
     redundancy_mode     = first_match(r"Redundancy Mode[ \t]*:[ \t]*(\S+)", redundancy_out)
@@ -106,22 +109,40 @@ def extract_context(folder: Path) -> dict:
 
     standalone = (redundancy_mode == "N/A" and redundancy_config == "Shutdown")
 
-    # Redundancy Role (Primary/Backup) and Active-Standby Role (Active/Standby)
-    # derived from Internal Redundancy State in the Activity Status section.
     redundancy_role     = ""
     active_standby_role = ""
-    for irs_m in re.finditer(r"Internal Redundancy State\s{2,}(.*)", redundancy_out):
-        vals = irs_m.group(1).split()
-        # Skip the Message Spool entry — its values are prefixed with "AD-"
-        if not any(v.startswith(("Pri-", "Bkup-")) for v in vals):
-            continue
-        if any(v == "Pri-Active" for v in vals):
-            redundancy_role, active_standby_role = "Primary", "Active"
-        elif any(v == "Pri-Standby" for v in vals):
-            redundancy_role, active_standby_role = "Backup", "Active"
-        elif any(v == "Bkup-Standby" for v in vals):
-            redundancy_role, active_standby_role = "Backup", "Standby"
-        break
+
+    if redundancy_mode == "Active/Active":
+        # In Active/Active the CLI Active-Standby Role is always None.
+        # Redundancy Role is Active when both Virtual Routers show a consistent
+        # activity state (both Local Active, or both Mate Active); Active (Down)
+        # when the VRs are in a mixed or unexpected state.
+        active_standby_role = "None"
+        activity_cols = re.split(r"\s{2,}", activity_raw)
+        if len(activity_cols) >= 2:
+            both_local = all("Local Active" in c for c in activity_cols[:2])
+            both_mate  = all("Mate Active"  in c for c in activity_cols[:2])
+            redundancy_role = "Active" if (both_local or both_mate) else "Active (Down)"
+        else:
+            redundancy_role = "Active"
+    else:
+        # Active/Standby: derive from Internal Redundancy State.
+        # Format: <Pri|Bkup>-<Active|Standby|NotReady>
+        #   prefix → Active-Standby Role (Primary/Backup)
+        #   suffix → Redundancy Role (Active/Standby/Not Ready)
+        for irs_m in re.finditer(r"Internal Redundancy State\s{2,}(.*)", redundancy_out):
+            vals = irs_m.group(1).split()
+            ha_vals = [v for v in vals if re.match(r"^(Pri|Bkup)-", v)]
+            if not ha_vals:
+                continue
+            chosen = ha_vals[0]
+            m_parts = re.match(r"^(Pri|Bkup)-(.+)$", chosen)
+            if m_parts:
+                prefix, suffix = m_parts.group(1), m_parts.group(2)
+                active_standby_role = "Primary" if prefix == "Pri" else "Backup"
+                suffix_map = {"Active": "Active", "Standby": "Standby", "NotReady": "Not Ready"}
+                redundancy_role = suffix_map.get(suffix, suffix)
+            break
 
     replication_out  = extract_command_output(diagnostics, "show replication stats")
     repl_interface   = first_match(r"Replication Interface[ \t]*:[ \t]*(\S+)", replication_out, default="")
@@ -150,11 +171,30 @@ def extract_context(folder: Path) -> dict:
             # Bridges exist but all are Admin Down — resolve against mate after all contexts built
             replication_site = "_down"
 
+    # Additional context: message spool, redundancy status, config-sync
+    spool_out    = extract_command_output(diagnostics, "show message-spool detail")
+    spool_config = first_match(r"Config Status\s*:\s*(.+)", spool_out, default="").strip()
+    spool_oper   = ""
+    if "enabled" in spool_config.lower():
+        spool_oper = first_match(r"Operational Status\s*:\s*(\S+)", spool_out, default="").strip()
+
+    redun_status = ""
+    if redundancy_config not in ("Unknown", "") and "enabled" in redundancy_config.lower():
+        redun_status = first_match(r"Redundancy Status\s*:\s*(\S+)", redundancy_out, default="").strip()
+
+    csync_out    = extract_command_output(diagnostics, "show config-sync")
+    csync_config = first_match(r"Admin Status\s*:\s*(\S+)", csync_out, default="").strip()
+    csync_oper   = ""
+    if "enabled" in csync_config.lower():
+        csync_oper = first_match(r"Oper Status\s*:\s*(\S+)", csync_out, default="").strip()
+
     return {
         "full_path":       str(folder.resolve()),
         "folder":          folder.name,
         "router_name":     router_name,
         "serial":          serial,
+        "chassis_product": chassis_product,
+        "solos_version":   solos_version,
         "redundancy_mode": redundancy_mode,
         "role":             role,
         "redundancy_role":  redundancy_role,
@@ -165,6 +205,12 @@ def extract_context(folder: Path) -> dict:
         "replication_active":  replication_active,
         "replication_mate":    re.sub(r'^v:', '', repl_mate) if replication_active else "",
         "replication_site":    replication_site,
+        "spool_config":    spool_config,
+        "spool_oper":      spool_oper,
+        "redun_config":    redundancy_config,
+        "redun_status":    redun_status,
+        "csync_config":    csync_config,
+        "csync_oper":      csync_oper,
     }
 
 
@@ -179,12 +225,17 @@ def print_context(ctx: dict, label: str = ""):
     print(f"\n{header}")
     print("-" * 50)
     w = 19  # width of longest label ("Active-Standby Role")
-    def row(label, value):
-        print(f"  {label:<{w}} : {value}")
 
-    row("Folder",             ctx['folder'])
+    left_lines = []
+    def row(lbl, value):
+        left_lines.append(f"  {lbl:<{w}} : {value}")
+
     row("Router Name",        ctx['router_name'])
     row("Serial Number",      ctx['serial'])
+    if ctx.get('chassis_product'):
+        row("Chassis Product #",  ctx['chassis_product'])
+    if ctx.get('solos_version'):
+        row("SolOS Version",      ctx['solos_version'])
     row("Redundancy Mode",    ctx['redundancy_mode'])
     na = ctx['redundancy_mode'] in ("N/A", "Unknown")
     if not na:
@@ -199,12 +250,50 @@ def print_context(ctx: dict, label: str = ""):
     else:
         row("Replication",      "N/A")
 
+    # Build Additional Context right column
+    right_lines = []
+    rw = 13  # width of longest right label ("Message Spool")
+    spool_config = ctx.get('spool_config', '')
+    spool_oper   = ctx.get('spool_oper', '')
+    redun_config = ctx.get('redun_config', '')
+    redun_status = ctx.get('redun_status', '')
+    csync_config = ctx.get('csync_config', '')
+    csync_oper   = ctx.get('csync_oper', '')
+
+    def ac_row(lbl, val):
+        right_lines.append(f"  {lbl:<{rw}} : {val}")
+
+    if any(v not in ('', 'Unknown') for v in [spool_config, redun_config, csync_config]):
+        right_lines.append("Additional Context")
+        if spool_config:
+            val = spool_config + (f" / {spool_oper}" if spool_oper else "")
+            ac_row("Message Spool", val)
+        if redun_config not in ('', 'Unknown'):
+            val = redun_config + (f" / {redun_status}" if redun_status else "")
+            ac_row("Redundancy", val)
+        if csync_config not in ('', 'Unknown'):
+            val = csync_config + (f" / {csync_oper}" if csync_oper else "")
+            ac_row("Config Sync", val)
+
+    # Print left and right columns side by side
+    if right_lines:
+        sep = max(len(l) for l in left_lines) + 4
+        for i in range(max(len(left_lines), len(right_lines))):
+            left  = left_lines[i]  if i < len(left_lines)  else ""
+            right = right_lines[i] if i < len(right_lines) else ""
+            print(f"{left:<{sep}}{right}" if right else left)
+    else:
+        for line in left_lines:
+            print(line)
+
 
 def broker_site_label(ctx: dict) -> str:
     """Return 'Role/Activity' label for a broker line in replication/HA output."""
     role_str = ctx.get("redundancy_role") or ""
     act_str  = ctx.get("active_standby_role") or ""
-    return f"{role_str}/{act_str}"
+    if act_str and act_str != "None":
+        return f"{role_str}/{act_str}"
+    return role_str
 
 
 def _broker_order(c):

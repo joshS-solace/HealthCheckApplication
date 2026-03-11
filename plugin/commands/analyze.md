@@ -36,9 +36,19 @@ Steps:
    When presenting the content of any fetched Confluence page, scan the full page body for **Customer Exception** blocks or similar special-handling notices (e.g. paragraphs beginning with "Customer Exception:", "If [Customer] report a...", "please send [person] an out of band heads up", "This is a drastic action", or any escalation/notification requirement directed at Support staff). If any such text is found, **always include it verbatim at the top of that page's section**, formatted as:
    > **Note:** <exact text of the exception/notice>
 
+   Do not add any commentary, applicability notes, or parenthetical remarks below the Note block — include only the verbatim text from the page.
+
    **If the Confluence search fails or returns an auth error**, tell the user:
    > The Atlassian MCP is not authenticated. To enable Confluence search:
    > 1. Run `/mcp` inside Claude Code
    > 2. Select **atlassian** and choose **Authenticate**
    > 3. Complete the OAuth login in your browser
    > 4. Re-run `/support-health-check:analyze` once authenticated
+
+5. For each KBA fetched in step 4, scan the page content for **diagnostic conditions** — these are checks the page says to perform against logs or CLI output to determine which resolution path applies (e.g. "grep debug.log for X", "look for Y in system.log", "check if Z is present in the SEL"). For each such condition:
+   a. Locate the relevant log file(s) under the router's `full_path` using Glob (log files may be in a nested subfolder — use `**/<filename>` to find them).
+   b. Run the grep using the Grep tool.
+   c. After the KBA troubleshooting steps, add a **Diagnostic check results** subsection. For every condition checked, state the outcome explicitly:
+      - If matches found: show the relevant lines and state what this implies (e.g. "Zippy Housing signature **found** — proceed with RND Jira rather than straight PSU replacement").
+      - If no matches: explicitly state it was not found and what this rules out (e.g. "Zippy Housing SEL signature **not found** in debug.log — Zippy Housing issue does not apply; proceed directly to PSU replacement").
+   Always report both positive and negative results — never silently skip a check.

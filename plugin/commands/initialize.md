@@ -19,7 +19,7 @@ Steps:
    ```
    Then tell the user: "Please open the URL above, enter the code, and authenticate. I will continue automatically once the process completes."
    Keep tailing until the background process exits.
-3. Once the background process finishes, parse the "Extracted:" section of the full output to get the folder name(s).
+3. Once the background process finishes, use only the output already returned by `TaskOutput` — do NOT read the temp output file from the tasks/ directory. Parse the "Extracted:" section of that output to get the folder name(s).
 4. Resolve the full path for each extracted folder — it lives next to its input file (use `Path(arg).parent / folder_name`), falling back to the current directory.
 5. Run `python <project_root>/establish_context.py <folder-path-1> <folder-path-2> ...` with all resolved paths (no redirection needed — the script writes `data/context_output.txt` itself).
 6. Read `<project_root>/data/context_output.txt` using the Read tool and paste its full contents verbatim as plain text in your response (do not summarize or restate it — paste it exactly as-is, inside a code block). Output nothing else.
