@@ -167,7 +167,18 @@ def pick_files() -> list[str]:
     return list(files)
 
 
+def clear_data_dir():
+    """Delete all files in the data/ directory next to this script."""
+    data_dir = SCRIPT_DIR / "data"
+    if data_dir.is_dir():
+        for f in data_dir.iterdir():
+            if f.is_file():
+                f.unlink()
+
+
 def main():
+    clear_data_dir()
+
     if len(sys.argv) < 2:
         args = pick_files()
         if not args:

@@ -4,7 +4,6 @@ test_gds/
 # Generated output files
 data/health_check_results.json
 data/router_context.json
-data/appliance_fails.json
 data/HA_pair_validation.json
 data/replication_pair_validation.json
 data/context_output.txt

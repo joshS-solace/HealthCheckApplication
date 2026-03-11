@@ -22,5 +22,4 @@ Steps:
 3. Once the background process finishes, parse the "Extracted:" section of the full output to get the folder name(s).
 4. Resolve the full path for each extracted folder — it lives next to its input file (use `Path(arg).parent / folder_name`), falling back to the current directory.
 5. Run `python <project_root>/establish_context.py <folder-path-1> <folder-path-2> ...` with all resolved paths (no redirection needed — the script writes `data/context_output.txt` itself).
-6. Read `<project_root>/data/context_output.txt` using the Read tool and paste its full contents verbatim as plain text in your response (do not summarize or restate it — paste it exactly as-is, inside a code block).
-7. List the discovered router names (parsed from the output) and tell the user they can now run `/support-health-check:analyze <router-name> ...` to health-check specific appliances.
+6. Read `<project_root>/data/context_output.txt` using the Read tool and paste its full contents verbatim as plain text in your response (do not summarize or restate it — paste it exactly as-is, inside a code block). Output nothing else.

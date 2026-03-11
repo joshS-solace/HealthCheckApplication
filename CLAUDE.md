@@ -34,7 +34,6 @@ handle_gather_diagnostics  →  establish_context  →  [user selects routers]
                                        ↓
                               health_check_results.json
                               + troubleshoot report (on FAILs)
-                              + appliance_fails.json
 ```
 
 `run_health_check_application.py` orchestrates all steps. Each script is also independently runnable.
@@ -67,7 +66,7 @@ GD archives typically extract to `<folder>/<folder>/cli-diagnostics.txt` (double
 
 ### Troubleshooting report (built into `health_check.py`)
 
-When any section FAILs, `health_check.py` automatically prints a troubleshoot report (log grep matches and correlated events from `further_troubleshooting_rules.yaml`) and writes `data/appliance_fails.json`. No separate script is needed.
+When any section FAILs, `health_check.py` automatically prints a troubleshoot report (log grep matches and correlated events from `further_troubleshooting_rules.yaml`). No separate script is needed.
 
 ### Plugin commands
 

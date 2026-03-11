@@ -145,7 +145,7 @@ def extract_context(folder: Path) -> dict:
             if all(e == "L" for e in establishes):
                 replication_site = "Active"
             elif all(e == "R" for e in establishes):
-                replication_site = "Backup"
+                replication_site = "Standby"
         elif repl_lines:
             # Bridges exist but all are Admin Down — resolve against mate after all contexts built
             replication_site = "_down"
@@ -293,7 +293,7 @@ def validate_replication_pairs(contexts: list):
 
     def _is_backup_site(g):
         s = g[0].get("replication_site", "")
-        return s in ("Backup", "Standby (Down)") or s.startswith("Backup")
+        return s in ("Standby", "Standby (Down)") or s.startswith("Standby")
 
     active_groups = [g for g in groups if _is_active_site(g)]
     backup_groups = [g for g in groups if _is_backup_site(g)]
@@ -353,24 +353,24 @@ def validate_replication_pairs(contexts: list):
         backup_rows = []
 
         if ag is not None:
-            primary_rows = _repl_rows_for_group(ag, "Primary")
-            pair["primary_site"] = _group_to_json(ag) + _missing_mate_json(ag)
+            primary_rows = _repl_rows_for_group(ag, "Active")
+            pair["active_site"] = _group_to_json(ag) + _missing_mate_json(ag)
 
         if bg is not None:
-            backup_rows = _repl_rows_for_group(bg, "Backup")
-            pair["backup_site"] = _group_to_json(bg) + _missing_mate_json(bg)
+            backup_rows = _repl_rows_for_group(bg, "Standby")
+            pair["standby_site"] = _group_to_json(bg) + _missing_mate_json(bg)
 
         # Infer missing opposite site from replication_mate
         if ag is not None and not backup_rows:
             repl_mate = ag[0].get("replication_mate", "")
             if repl_mate:
-                backup_rows = [["Backup", "-", repl_mate, "-", "Missing GD"]]
-                pair["backup_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+                backup_rows = [["Standby", "-", repl_mate, "-", "Missing GD"]]
+                pair["standby_site"] = [{"router_name": repl_mate, "missing_gd": True}]
         elif bg is not None and not primary_rows:
             repl_mate = bg[0].get("replication_mate", "")
             if repl_mate:
-                primary_rows = [["Primary", "-", repl_mate, "-", "Missing GD"]]
-                pair["primary_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+                primary_rows = [["Active", "-", repl_mate, "-", "Missing GD"]]
+                pair["active_site"] = [{"router_name": repl_mate, "missing_gd": True}]
 
         row_groups = [g for g in [primary_rows, backup_rows] if g]
         if row_groups:
@@ -489,7 +489,7 @@ def main():
             mate_site = mate_ctx.get("replication_site", "") if mate_ctx else ""
             if mate_site.startswith("Active"):
                 ctx["replication_site"] = "Standby (Down)"
-            elif mate_site in ("Backup", "Standby (Down)") or mate_site.startswith("Backup"):
+            elif mate_site in ("Standby", "Standby (Down)") or mate_site.startswith("Standby"):
                 ctx["replication_site"] = "Active (Down)"
             else:
                 ctx["replication_site"] = "Down"

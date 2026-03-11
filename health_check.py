@@ -305,54 +305,6 @@ def _print_troubleshoot_report(data: dict):
         print()
 
 
-def _build_fails_json(data: dict) -> list:
-    fails = [r for r in data["results"] if r["status"] == "FAIL"]
-    output = []
-    for result in fails:
-        section = result["section"]
-        entry = {"section": section, "description": result["description"], "failures": []}
-
-        if section in ("1.1", "1.2"):
-            for failure in result["failures"]:
-                entry["failures"].append({"message": _clean_message(failure["message"])})
-            output.append(entry)
-            continue
-
-        for ctx in result.get("troubleshooting_context", []):
-            matches = ctx.get("matches", [])
-            correlated = ctx.get("correlated", [])
-            if not matches and not correlated:
-                continue
-            ctx_entry = {"description": ctx["description"], "matches": [], "correlated": []}
-            for m in matches:
-                ctx_entry["matches"].append({
-                    "source": m["source"], "timestamp": m["timestamp"],
-                    "message": m.get("message", m["line"]),
-                })
-            for m in correlated:
-                ctx_entry["correlated"].append({
-                    "source": m["source"], "timestamp": m["timestamp"],
-                    "message": m.get("message", m["line"]),
-                })
-            entry.setdefault("troubleshooting_context", []).append(ctx_entry)
-
-        seen = set()
-        for failure in result["failures"]:
-            msg = _clean_message(failure["message"])
-            if msg in seen:
-                continue
-            seen.add(msg)
-            fail_entry = {"message": msg, "matches": []}
-            for m in failure.get("matches", []):
-                fail_entry["matches"].append({
-                    "source": m["source"], "timestamp": m["timestamp"],
-                    "message": m.get("message", m["line"]),
-                })
-            entry["failures"].append(fail_entry)
-
-        output.append(entry)
-    return output
-
 
 # ---------------------------------------------------------------------------
 # Troubleshooting steps
@@ -1045,11 +997,6 @@ def run(folder: Path, router_name: str = None) -> bool:
     if any_failed:
         print()
         _print_troubleshoot_report(output)
-        fails_json = _build_fails_json(output)
-        fails_path = Path(__file__).parent / "data" / "appliance_fails.json"
-        with open(fails_path, "w") as f:
-            json.dump(fails_json, f, indent=2)
-        print(f"[INFO] Fails written to {fails_path}")
 
     return any_failed
 
