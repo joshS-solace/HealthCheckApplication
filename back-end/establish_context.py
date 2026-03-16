@@ -148,27 +148,74 @@ def extract_context(folder: Path) -> dict:
     repl_interface   = first_match(r"Replication Interface[ \t]*:[ \t]*(\S+)", replication_out, default="")
     repl_mate        = first_match(r"Replication Mate[ \t]*:[ \t]*(\S+)", replication_out, default="")
     repl_connect_via = first_match(r"Connect-Via[ \t]*:[ \t]*(\S+)", replication_out, default="")
-    replication_active = all([repl_interface, repl_mate, repl_connect_via])
+
+    # Determine replication status from ConfigSync Bridge block within show replication stats
+    repl_cs_admin = ""
+    repl_cs_state = ""
+    cs_admin_m = re.search(r'Admin State\s*:\s*(\S+)', replication_out)
+    if cs_admin_m:
+        repl_cs_admin = cs_admin_m.group(1)
+        after_admin = replication_out[cs_admin_m.end():]
+        cs_state_m = re.search(r'^\s*State\s*:\s*(\S+)', after_admin, re.MULTILINE)
+        if cs_state_m:
+            repl_cs_state = cs_state_m.group(1)
+
+    if repl_cs_admin.lower() == 'disabled':
+        replication_status = "Disabled / Down"
+        replication_active = False
+    elif repl_cs_admin.lower() == 'enabled':
+        if repl_cs_state.lower() == 'n/a':
+            replication_status = "N/A"
+            replication_active = False
+        else:
+            replication_status = "Enabled / Up" if repl_cs_state.lower() == 'up' else "Enabled / Down"
+            replication_active = True
+    else:
+        # No ConfigSync block found — fall back to presence of interface fields
+        replication_active = all([repl_interface, repl_mate, repl_connect_via])
+        replication_status = "Active" if replication_active else "N/A"
 
     replication_site = ""
     if replication_active:
         bridge_out = extract_command_output(diagnostics, "show bridge *")
-        # Each replication bridge row starts with "#MSGVPN_REPL" in the 12-char Name column.
-        # The flag columns A E I O Q R appear on that same first line; E is the 2nd flag (L=Local, R=Remote).
-        repl_lines = [l for l in bridge_out.splitlines() if re.match(r"#MSGVPN_REPL", l)]
-        establishes = []
-        for line in repl_lines:
-            # Only consider bridges that are Admin Up (A=U) with a valid establisher (E=L or R)
-            m = re.search(r"U ([LR]) [UD-]", line)
-            if m:
-                establishes.append(m.group(1))
-        if establishes:
-            if all(e == "L" for e in establishes):
+        lines = bridge_out.splitlines()
+
+        # Find CFGSYNC replication bridge — Admin=Up establisher (L/R) determines local site role
+        cfgsync_establisher = ""
+        cfgsync_found = False
+        for line in lines:
+            if re.match(r"#CFGSYNC_REP", line):
+                cfgsync_found = True
+                m = re.search(r"U ([LR]) [UD-]", line)
+                if m:
+                    cfgsync_establisher = m.group(1)
+                break
+
+        # Collect MSGVPN replication bridge establisher flags (L, R, or -)
+        msgvpn_establishers = []
+        for line in lines:
+            if re.match(r"#MSGVPN_REPL", line):
+                m = re.search(r"[UD] ([LR-]) [UD-]", line)
+                if m:
+                    msgvpn_establishers.append(m.group(1))
+
+        has_L = "L" in msgvpn_establishers
+        has_R = "R" in msgvpn_establishers
+
+        if cfgsync_establisher in ("L", "R"):
+            if has_L and has_R:
+                active_count   = msgvpn_establishers.count("L")
+                standby_count  = msgvpn_establishers.count("R")
+                total          = active_count + standby_count
+                active_pct     = round(active_count  / total * 100)
+                standby_pct    = 100 - active_pct
+                replication_site = f"Active ({active_pct}%) / Standby ({standby_pct}%)"
+            elif cfgsync_establisher == "L":
                 replication_site = "Active"
-            elif all(e == "R" for e in establishes):
+            else:
                 replication_site = "Standby"
-        elif repl_lines:
-            # Bridges exist but all are Admin Down — resolve against mate after all contexts built
+        elif cfgsync_found or msgvpn_establishers:
+            # Bridges found but none established — resolve against mate after all contexts built
             replication_site = "_down"
 
     # Additional context: message spool, redundancy status, config-sync
@@ -203,6 +250,7 @@ def extract_context(folder: Path) -> dict:
         "mate_router":     mate_router,
         "standalone":          standalone,
         "replication_active":  replication_active,
+        "replication_status":  replication_status,
         "replication_mate":    re.sub(r'^v:', '', repl_mate) if replication_active else "",
         "replication_site":    replication_site,
         "spool_config":    spool_config,
@@ -226,33 +274,6 @@ def print_context(ctx: dict, label: str = ""):
     print("-" * 50)
     w = 19  # width of longest label ("Active-Standby Role")
 
-    left_lines = []
-    def row(lbl, value):
-        left_lines.append(f"  {lbl:<{w}} : {value}")
-
-    row("Router Name",        ctx['router_name'])
-    row("Serial Number",      ctx['serial'])
-    if ctx.get('chassis_product'):
-        row("Chassis Product #",  ctx['chassis_product'])
-    if ctx.get('solos_version'):
-        row("SolOS Version",      ctx['solos_version'])
-    row("Redundancy Mode",    ctx['redundancy_mode'])
-    na = ctx['redundancy_mode'] in ("N/A", "Unknown")
-    if not na:
-        row("Redundancy Role",    ctx['redundancy_role'])
-        row("Active-Standby Role", ctx['active_standby_role'])
-    if ctx['mate_router']:
-        row("Mate Router",    ctx['mate_router'])
-    if ctx['replication_active']:
-        row("Replication",      "Active")
-        row("Replication Mate", ctx['replication_mate'])
-        row("Replication Site", ctx['replication_site'])
-    else:
-        row("Replication",      "N/A")
-
-    # Build Additional Context right column
-    right_lines = []
-    rw = 13  # width of longest right label ("Message Spool")
     spool_config = ctx.get('spool_config', '')
     spool_oper   = ctx.get('spool_oper', '')
     redun_config = ctx.get('redun_config', '')
@@ -260,20 +281,44 @@ def print_context(ctx: dict, label: str = ""):
     csync_config = ctx.get('csync_config', '')
     csync_oper   = ctx.get('csync_oper', '')
 
-    def ac_row(lbl, val):
-        right_lines.append(f"  {lbl:<{rw}} : {val}")
+    # Left column: identity + status fields
+    left_lines = []
+    def row(lbl, value):
+        left_lines.append(f"  {lbl:<{w}} : {value}")
 
-    if any(v not in ('', 'Unknown') for v in [spool_config, redun_config, csync_config]):
-        right_lines.append("Additional Context")
-        if spool_config:
-            val = spool_config + (f" / {spool_oper}" if spool_oper else "")
-            ac_row("Message Spool", val)
-        if redun_config not in ('', 'Unknown'):
-            val = redun_config + (f" / {redun_status}" if redun_status else "")
-            ac_row("Redundancy", val)
-        if csync_config not in ('', 'Unknown'):
-            val = csync_config + (f" / {csync_oper}" if csync_oper else "")
-            ac_row("Config Sync", val)
+    row("Router Name",       ctx['router_name'])
+    row("Serial Number",     ctx['serial'])
+    if ctx.get('chassis_product'):
+        row("Chassis Product #", ctx['chassis_product'])
+    if ctx.get('solos_version'):
+        row("SolOS Version",     ctx['solos_version'])
+    if spool_config:
+        row("Message Spool", spool_config + (f" / {spool_oper}" if spool_oper else ""))
+    if redun_config not in ('', 'Unknown'):
+        row("Redundancy", redun_config + (f" / {redun_status}" if redun_status else ""))
+    if csync_config not in ('', 'Unknown'):
+        row("Config Sync", csync_config + (f" / {csync_oper}" if csync_oper else ""))
+
+    # Right column: redundancy topology + replication
+    right_lines = []
+    def rrow(lbl, val):
+        right_lines.append(f"  {lbl:<{w}} : {val}")
+
+    redundancy_enabled_up = (
+        redun_config.lower() == 'enabled' and redun_status.lower() == 'up'
+    )
+    if redundancy_enabled_up:
+        rrow("Redundancy Mode",     ctx['redundancy_mode'])
+        rrow("Active-Standby Role", ctx['active_standby_role'])
+        ad_role = f"AD-{ctx['redundancy_role']}" if ctx.get('redundancy_role') else ""
+        rrow("Redundancy Role",     ad_role)
+    if ctx['mate_router']:
+        rrow("Mate Router",         ctx['mate_router'])
+    repl_status = ctx.get("replication_status", "N/A")
+    rrow("Replication", repl_status)
+    if ctx.get("replication_active"):
+        rrow("Replication Mate", ctx['replication_mate'])
+        rrow("Replication Site", ctx['replication_site'])
 
     # Print left and right columns side by side
     if right_lines:
@@ -288,12 +333,13 @@ def print_context(ctx: dict, label: str = ""):
 
 
 def broker_site_label(ctx: dict) -> str:
-    """Return 'Role/Activity' label for a broker line in replication/HA output."""
+    """Return 'Active-Standby Role/AD-Redundancy Role' label for table rows."""
     role_str = ctx.get("redundancy_role") or ""
     act_str  = ctx.get("active_standby_role") or ""
-    if act_str and act_str != "None":
-        return f"{role_str}/{act_str}"
-    return role_str
+    ad_role  = f"AD-{role_str}" if role_str else ""
+    if act_str and ad_role:
+        return f"{act_str}/{ad_role}"
+    return act_str or ad_role
 
 
 def _broker_order(c):
@@ -417,18 +463,18 @@ def validate_replication_pairs(contexts: list):
     for og in other_groups:
         matched_pairs.append((og, None))
 
-    REPL_HEADERS = ["Site", "HA Role", "Router", "Repl Site Status", "Info"]
+    REPL_HEADERS = ["HA Role", "Router", "Repl Site Status", "Info"]
 
     def _repl_rows_for_group(group, site_label):
         rows = []
         for ctx in sorted(group, key=_broker_order):
-            rows.append([site_label, broker_site_label(ctx), ctx["router_name"], ctx.get("replication_site", ""), ""])
+            rows.append([broker_site_label(ctx), ctx["router_name"], ctx.get("replication_site", ""), ""])
         if len(group) == 1:
             mate = group[0].get("mate_router", "")
             if mate:
                 role = group[0].get("redundancy_role", "")
                 missing_role = "Backup" if role == "Primary" else "Primary" if role == "Backup" else "Mate"
-                rows.append([site_label, missing_role, mate, "-", "Missing GD"])
+                rows.append([missing_role, mate, "-", "Missing GD"])
         return rows
 
     pairs_json = []
@@ -453,12 +499,12 @@ def validate_replication_pairs(contexts: list):
         if ag is not None and not backup_rows:
             repl_mate = ag[0].get("replication_mate", "")
             if repl_mate:
-                backup_rows = [["Standby", "-", repl_mate, "-", "Missing GD"]]
+                backup_rows = [["-", repl_mate, "-", "Missing GD"]]
                 pair["standby_site"] = [{"router_name": repl_mate, "missing_gd": True}]
         elif bg is not None and not primary_rows:
             repl_mate = bg[0].get("replication_mate", "")
             if repl_mate:
-                primary_rows = [["Active", "-", repl_mate, "-", "Missing GD"]]
+                primary_rows = [["-", repl_mate, "-", "Missing GD"]]
                 pair["active_site"] = [{"router_name": repl_mate, "missing_gd": True}]
 
         row_groups = [g for g in [primary_rows, backup_rows] if g]
@@ -500,26 +546,24 @@ def validate_ha_pairs(contexts: list):
     print("\nHA Pair Validation")
     print("-" * 50)
 
-    HA_HEADERS = ["HA Role", "Router", "Redundancy", "Replication", "Info"]
+    HA_HEADERS = ["Active-Standby Role", "Redundancy Role", "Router", "Info"]
 
     def _ha_row(ctx, missing_role=None):
         if missing_role is not None:
-            return [missing_role, ctx["router_name"], "-", "-", "Missing GD"]
-        repl = "N/A"
-        if ctx.get("replication_active"):
-            site = ctx.get("replication_site", "")
-            repl = site if site else "Active"
+            return [missing_role, "-", ctx["router_name"], "Missing GD"]
+        ad_role = f"AD-{ctx['redundancy_role']}" if ctx.get("redundancy_role") else ""
         return [
-            broker_site_label(ctx),
+            ctx.get("active_standby_role", ""),
+            ad_role,
             ctx["router_name"],
-            ctx.get("redundancy_mode", ""),
-            repl,
             "",
         ]
 
     pairs_json = []
     for n, (kind, ctx1, ctx2) in enumerate(pairs, 1):
-        print(f"\n  HA Pair {n}")
+        mode = ctx1.get("redundancy_mode", "") if kind == "solo" else (ctx1.get("redundancy_mode") or (ctx2.get("redundancy_mode") if ctx2 else "") or "")
+        mode_label = f" - {mode}" if mode and mode not in ("N/A", "Unknown") else ""
+        print(f"\n  HA Pair {n}{mode_label}")
         rows = []
         brokers = []
         if kind == "full":
@@ -561,14 +605,16 @@ def main():
     sys.stdout = tee
 
     # Build all contexts first so we can cross-reference mates
-    contexts = []
+    # results is a list of (folder, ctx_or_None) — None means cli-diagnostics.txt missing
+    results = []
     for folder in folders:
         try:
             ctx = extract_context(folder)
-        except FileNotFoundError as e:
-            print(f"[ERROR] {e}")
-            continue
-        contexts.append(ctx)
+            results.append((folder, ctx))
+        except FileNotFoundError:
+            results.append((folder, None))
+
+    contexts = [ctx for _, ctx in results if ctx is not None]
 
     # Resolve "_down" replication sites against the mate's known site
     for ctx in contexts:
@@ -587,9 +633,15 @@ def main():
     print("Solace Broker Context")
     print("=" * 50)
 
-    for i, ctx in enumerate(contexts, 1):
-        label = f"Broker {i}" if len(contexts) > 1 else ""
-        print_context(ctx, label)
+    multi = len(results) > 1
+    for i, (folder, ctx) in enumerate(results, 1):
+        label = f"Broker {i}" if multi else ""
+        if ctx is None:
+            header = f"Broker Context — {label} - No cli-diagnostics.txt" if label else "Broker Context — No cli-diagnostics.txt"
+            print(f"\n{header}")
+            print("-" * 50)
+        else:
+            print_context(ctx, label)
 
     repl_pairs = validate_replication_pairs(contexts)
     ha_pairs = validate_ha_pairs(contexts)
