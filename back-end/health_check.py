@@ -59,17 +59,23 @@ def load_troubleshooting_rules(path: Path) -> dict:
 def resolve_folder(folder: Path) -> Path:
     """Resolve the actual diagnostics folder, handling the common case where
     the archive extracts into a same-named subfolder."""
-    if not (folder / "cli-diagnostics.txt").exists():
-        nested = folder / folder.name / "cli-diagnostics.txt"
+    for diag in ("cli-diagnostics.txt", "gdh-diagnostics.txt"):
+        if (folder / diag).exists():
+            return folder
+        nested = folder / folder.name / diag
         if nested.exists():
             return folder / folder.name
     return folder
 
 
 def load_diagnostics(folder: Path) -> str:
-    """Load cli-diagnostics.txt. Exits with an error if the file is missing."""
+    """Load cli-diagnostics.txt (or gdh-diagnostics.txt). Exits if neither is found."""
     diag_path = folder / "cli-diagnostics.txt"
     if not diag_path.exists():
+        gdh_path = folder / "gdh-diagnostics.txt"
+        if gdh_path.exists():
+            with open(gdh_path, "r", errors="replace") as f:
+                return _normalize_gdh(f.read())
         print(f"ERROR: cli-diagnostics.txt not found in '{folder}'.")
         print("  This file is required to perform the health check.")
         sys.exit(1)
@@ -77,13 +83,42 @@ def load_diagnostics(folder: Path) -> str:
         return f.read()
 
 
+def _normalize_gdh(text: str) -> str:
+    """Convert gather-diagnostics-host prompt format to separator-based format."""
+    m = re.search(r'^(\S+)> (?:show |no |clear |debug )', text, re.MULTILINE)
+    if not m:
+        return text
+    hostname = re.escape(m.group(1))
+    sections = re.split(rf'^{hostname}> ', text, flags=re.MULTILINE)
+    sep = "=" * 50
+    result = []
+    for section in sections[1:]:
+        newline_idx = section.find('\n')
+        if newline_idx == -1:
+            command, output = section.strip(), ""
+        else:
+            command = section[:newline_idx].strip()
+            output = section[newline_idx + 1:].rstrip()
+        result.append(f"\n{sep}\n# {command}\n{sep}\n{output}\n")
+    return '\n'.join(result)
+
+
+def detect_platform_type(diagnostics: str) -> str:
+    """Return 'appliance' if the version line shows a numeric chassis model, else 'software'."""
+    m = re.search(r"Solace PubSub\+\s+(\S+)\s+Version", diagnostics)
+    return "appliance" if (m and m.group(1).isdigit()) else "software"
+
+
 def load_logs(folder: Path) -> dict:
     """
-    Load log files from <folder>/usr/sw/jail/logs/.
+    Load log files from <folder>/usr/sw/jail/logs/ (appliance/standard GD)
+    or <folder>/container_solace/usr/sw/jail/logs/ (GDH / Kubernetes).
     Warns if command.log, debug.log, or event.log are missing.
     Numbered logs (e.g. event.log.1) are loaded silently if present.
     """
     logs_dir = folder / "usr" / "sw" / "jail" / "logs"
+    if not logs_dir.exists():
+        logs_dir = folder / "container_solace" / "usr" / "sw" / "jail" / "logs"
     logs = {}
 
     if not logs_dir.exists():
@@ -590,6 +625,21 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
             for alarm in alarms:
                 fail(f"Active alarm: {alarm}")
 
+    elif check_type == "post_check":
+        post_status_m = re.search(r"POST Status\s*:\s*(\w+)", content, re.IGNORECASE)
+        if not post_status_m:
+            print("  [WARNING] POST status not found in diagnostics -- POST check skipped.")
+        elif post_status_m.group(1).upper() == "FAILED":
+            error_lines = re.findall(
+                r"^\s*\d+\s+\[(?:FAILED|NON-CRITICAL)\][^\n]+",
+                content, re.MULTILINE | re.IGNORECASE
+            )
+            if error_lines:
+                for line in error_lines:
+                    fail(f"POST failure: {line.strip()}")
+            else:
+                fail("POST Status is FAILED.")
+
     elif check_type == "print_info_fields":
         for field in check.get("fields", []):
             m = re.search(field["pattern"], content, re.IGNORECASE)
@@ -824,20 +874,29 @@ def run(folder: Path, router_name: str = None) -> bool:
     """Run health checks against a gather-diagnostics folder. Returns True if any checks failed."""
     folder = resolve_folder(folder)
 
-    rules_path = Path(__file__).parent / "rules" / "appliance_healthcheck_rules.yaml"
-    if not rules_path.exists():
-        print(f"ERROR: appliance_healthcheck_rules.yaml not found at {rules_path}")
-        sys.exit(1)
-
     print(f"Diagnostics folder : {folder.resolve()}")
-    print(f"Rules file         : {rules_path.resolve()}")
     print()
 
     diagnostics = load_diagnostics(folder)
     logs = load_logs(folder)
-    rules = load_rules(rules_path).get("rules", [])
 
-    troubleshooting_path = Path(__file__).parent / "rules" / "appliance_further_troubleshooting_rules.yaml"
+    platform_type = detect_platform_type(diagnostics)
+    rules_dir = Path(__file__).parent / "rules"
+    if platform_type == "appliance":
+        rules_path         = rules_dir / "appliance_healthcheck_rules.yaml"
+        troubleshooting_path = rules_dir / "appliance_further_troubleshooting_rules.yaml"
+    else:
+        rules_path         = rules_dir / "software_broker_healthcheck_rules.yaml"
+        troubleshooting_path = rules_dir / "software_broker_further_troubleshooting_rules.yaml"
+
+    if not rules_path.exists():
+        print(f"ERROR: {rules_path.name} not found at {rules_path}")
+        sys.exit(1)
+
+    print(f"Platform type      : {platform_type}")
+    print(f"Rules file         : {rules_path.resolve()}")
+
+    rules = load_rules(rules_path).get("rules", [])
     troubleshooting_rules = load_troubleshooting_rules(troubleshooting_path)
 
     reference_date, date_is_fallback = find_latest_log_date(logs)

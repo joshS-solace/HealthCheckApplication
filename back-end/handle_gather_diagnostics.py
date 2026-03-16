@@ -54,7 +54,9 @@ def resolve(arg: str):
     p7m_tgz  = Path(str(base) + ".tgz.p7m.tgz")
 
     # Check exact input first, then try permutations in order: folder → .tgz → .tgz.p7m → .tgz.p7m.tgz
-    candidates = [p, base, tgz, p7m, p7m_tgz]
+    # Also try appending .p7m to the exact input — handles names like "file.tgz (1)" → "file.tgz (1).p7m"
+    p_p7m = Path(str(p) + ".p7m")
+    candidates = [p, p_p7m, base, tgz, p7m, p7m_tgz]
     for candidate in candidates:
         if candidate.is_dir():
             return candidate, "folder"
@@ -176,6 +178,23 @@ def clear_data_dir():
                 f.unlink()
 
 
+def recombine_args(raw: list[str]) -> list[str]:
+    """
+    Recombine filename parts that were split by the shell on spaces.
+    e.g. ['file.tgz', '(1)', 'other.tgz', '(1)'] -> ['file.tgz (1)', 'other.tgz (1)']
+    Handles bare '(N)' or '(N).p7m' suffixes appended by Windows when downloading
+    duplicate files.
+    """
+    import re
+    result = []
+    for arg in raw:
+        if re.match(r'^\(\d+\)(\.\w+)*$', arg) and result:
+            result[-1] = result[-1] + ' ' + arg
+        else:
+            result.append(arg)
+    return result
+
+
 def main():
     clear_data_dir()
 
@@ -184,7 +203,7 @@ def main():
         if not args:
             sys.exit(0)
     else:
-        args = sys.argv[1:]
+        args = recombine_args(sys.argv[1:])
 
     processed = []
     errors = []

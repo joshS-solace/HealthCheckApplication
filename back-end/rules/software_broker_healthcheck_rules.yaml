@@ -1,5 +1,195 @@
-# software_broker_healthcheck_rules.yaml
-# Health check rules for Solace software brokers (PubSub+ software edition).
-# Structure mirrors appliance_healthcheck_rules.yaml.
+metadata:
+  name: solace_software_broker_health_check
+  source: "Solace PubSub+ Software Event Broker Health Check"
+  version: 1
 
-rules: []
+rules:
+
+  # Part 1 — Broker Identity and Release (SolOS)
+  - section: "1.0"
+    description: "Broker router name."
+    command: "show router-name"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: print_info_fields
+        fields:
+          - label: "Router Name"
+            pattern: "Router Name\\s*:\\s*(\\S+)"
+
+  - section: "1.1"
+    description: "Installed SolOS release is currently supported."
+    command: "show version"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: supported_version_check
+        lifecycle:
+          - version: "10.4.1"
+            end_of_full_support: "2026-06-15"
+            end_of_technical_support: "2026-06-15"
+            release_type: "LTS"
+
+          - version: "10.5.1"
+            end_of_full_support: "2024-09-15"
+            end_of_technical_support: "2026-09-15"
+
+          - version: "10.6.1"
+            end_of_full_support: "2024-12-15"
+            end_of_technical_support: "2026-12-15"
+
+          - version: "10.7.1"
+            end_of_full_support: "2025-03-15"
+            end_of_technical_support: "2027-03-15"
+
+          - version: "10.8.1"
+            end_of_full_support: "2027-06-15"
+            end_of_technical_support: "2027-06-15"
+            release_type: "LTS"
+
+          - version: "10.9.1"
+            end_of_full_support: "2025-09-15"
+            end_of_technical_support: "2027-09-15"
+
+          - version: "10.10.1"
+            end_of_full_support: "2025-12-15"
+            end_of_technical_support: "2027-12-15"
+
+          - version: "10.11.0"
+            end_of_full_support: "2026-01-31"
+            end_of_technical_support: "2026-01-31"
+            release_type: "Preview"
+
+          - version: "10.11.1"
+            end_of_full_support: "2026-03-15"
+            end_of_technical_support: "2028-03-15"
+
+          - version: "10.12.0"
+            end_of_full_support: "2026-04-30"
+            end_of_technical_support: "2026-04-30"
+            release_type: "Preview"
+
+          - version: "10.25.0"
+            end_of_full_support: "2027-06-30"
+            end_of_technical_support: "2027-06-30"
+            release_type: "LTS"
+
+        failure_message: "Installed SolOS release is out of support."
+
+  # Part 2 — System Stability
+  - section: "2.1"
+    description: "Uptime and last restart reason checked."
+    command: "show system detail"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: contains
+        expected: "System Uptime"
+        failure_message: "Missing system uptime from diagnostics."
+      - type: contains
+        expected: "Last Restart Reason"
+        failure_message: "Missing last restart reason."
+      - type: print_info_fields
+        fields:
+          - label: "System Uptime"
+            pattern: "System Uptime\\s*:\\s*(.+)"
+          - label: "Last Restart Reason"
+            pattern: "Last Restart Reason\\s*:\\s*(.+)"
+
+  - section: "2.2"
+    description: "No recent critical SYSTEM_SYSTEM_HEALTH_ events."
+    source: "system.log"
+    checks:
+      - type: log_paired_events
+        patterns:
+          - "SYSTEM_SYSTEM_HEALTH_"
+        failure_message: "Critical SYSTEM_SYSTEM_HEALTH_ events found in system.log."
+
+  - section: "2.3"
+    description: "Power-On Self Test (POST) passed."
+    command: "show system post"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: post_check
+
+  # Part 5 — Message Spool
+  - section: "5.1"
+    description: "Message spool operational"
+    command: "show message-spool detail"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: message_spool_status_check
+
+  # Part 6 — Redundancy
+  # 6.1.A — Active/Standby Primary Message-Router
+  - section: "6.1.A"
+    description: "Redundancy Checks"
+    info_message: "Active/Standby redundancy — Primary Message-Router"
+    command: "show redundancy detail"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: contains
+        expected: "Redundancy Mode          : Active/Standby"
+        failure_message: "Redundancy not configured for Active/Standby."
+      - type: contains
+        expected: "Active-Standby Role      : Primary"
+        failure_message: "Broker is not the Active/Standby Primary."
+      - type: contains
+        expected: "Configuration Status     : Enabled"
+        failure_message: "Redundancy Configuration Status is not Enabled."
+      - type: contains
+        expected: "Redundancy Status        : Up"
+        failure_message: "Redundancy Status is not Up."
+
+  # 6.1.B — Active/Standby Backup Message-Router
+  - section: "6.1.B"
+    description: "Redundancy Checks"
+    info_message: "Active/Standby redundancy — Backup Message-Router"
+    command: "show redundancy detail"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: contains
+        expected: "Redundancy Mode          : Active/Standby"
+        failure_message: "Redundancy not configured for Active/Standby."
+      - type: contains
+        expected: "Active-Standby Role      : Backup"
+        failure_message: "Broker is not the Active/Standby Backup."
+      - type: contains
+        expected: "Configuration Status     : Enabled"
+        failure_message: "Redundancy Configuration Status is not Enabled."
+      - type: contains
+        expected: "Redundancy Status        : Up"
+        failure_message: "Redundancy Status is not Up."
+
+  # 6.1.C — Monitor Node
+  - section: "6.1.C"
+    description: "Redundancy Checks"
+    info_message: "Monitor Node — participates in HA quorum only, no message routing"
+    command: "show redundancy detail"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: contains
+        expected: "Operating Mode           : Monitoring Node"
+        failure_message: "Operating Mode is not Monitoring Node."
+      - type: contains
+        expected: "Redundancy Mode          : Active/Standby"
+        failure_message: "Redundancy not configured for Active/Standby."
+      - type: contains
+        expected: "Configuration Status     : Enabled"
+        failure_message: "Redundancy Configuration Status is not Enabled."
+      - type: contains
+        expected: "Redundancy Status        : Up"
+        failure_message: "Redundancy Status is not Up."
+
+  # 6.1.D — Standalone
+  - section: "6.1.D"
+    description: "Redundancy Checks"
+    info_message: "Redundancy is Shutdown with no mate configured — standalone broker."
+    command: "show redundancy detail"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: redundancy_standalone_check
+
+  - section: "6.2"
+    description: "Config-Sync operational status"
+    command: "show config-sync"
+    source: "cli-diagnostics.txt"
+    checks:
+      - type: config_sync_status_check

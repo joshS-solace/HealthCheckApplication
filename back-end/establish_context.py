@@ -36,6 +36,36 @@ class _Tee:
 # Helpers (subset of main.py — no shared import to keep this standalone)
 # ---------------------------------------------------------------------------
 
+def _normalize_gdh(text: str) -> str:
+    """Convert gather-diagnostics-host format to standard cli-diagnostics format.
+
+    GDH sections look like:
+        hostname> show version
+        <output>
+        hostname> show hardware detail
+        <output>
+
+    This converts them to the separator-based format expected by extract_command_output().
+    """
+    m = re.search(r'^(\S+)> (?:show |no |clear |debug )', text, re.MULTILINE)
+    if not m:
+        return text
+    hostname = re.escape(m.group(1))
+    sections = re.split(rf'^{hostname}> ', text, flags=re.MULTILINE)
+    sep = "=" * 50
+    result = []
+    for section in sections[1:]:
+        newline_idx = section.find('\n')
+        if newline_idx == -1:
+            command = section.strip()
+            output = ""
+        else:
+            command = section[:newline_idx].strip()
+            output = section[newline_idx + 1:].rstrip()
+        result.append(f"\n{sep}\n# {command}\n{sep}\n{output}\n")
+    return '\n'.join(result)
+
+
 def load_diagnostics(folder: Path) -> str:
     path = folder / "cli-diagnostics.txt"
     if not path.exists():
@@ -43,6 +73,10 @@ def load_diagnostics(folder: Path) -> str:
         if nested.exists():
             path = nested
         else:
+            gdh_path = folder / "gdh-diagnostics.txt"
+            if gdh_path.exists():
+                with open(gdh_path, "r", errors="replace") as f:
+                    return _normalize_gdh(f.read())
             raise FileNotFoundError(f"cli-diagnostics.txt not found in '{folder}'.")
     with open(path, "r", errors="replace") as f:
         return f.read()
@@ -50,22 +84,59 @@ def load_diagnostics(folder: Path) -> str:
 
 def extract_command_output(diagnostics: str, command: str) -> str:
     escaped = re.escape(command)
-    sep = r"[-=#]{5,}"
+    # any_sep: detect section headers (= # or - are all used as opening separators)
+    any_sep = r"[-=#]{5,}"
+    # sec_sep: only = or # terminate a section — table content uses --- lines which
+    # must NOT be treated as section boundaries.
+    sec_sep = r"[=#]{5,}"
     pat_a = (
-        rf"(?:{sep})\s*\n"
-        rf"\s*#?\s*{escaped}\s*\n"
-        rf"\s*{sep}\s*\n"
+        rf"(?:{any_sep})\s*\n"
+        rf"\s*#?\s*{escaped}[^\n]*\n"
+        rf"\s*{any_sep}\s*\n"
         rf"(.*?)"
-        rf"(?=\n{sep}|\Z)"
+        rf"(?=\n{sec_sep}|\Z)"
     )
     m = re.search(pat_a, diagnostics, re.DOTALL | re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    pat_b = rf"(?:{sep})\s*{escaped}\s*(?:{sep})(.*?)(?={sep}|\Z)"
+    pat_b = rf"(?:{any_sep})\s*{escaped}[^\n]*(?:{any_sep})(.*?)(?={sec_sep}|\Z)"
     m = re.search(pat_b, diagnostics, re.DOTALL | re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return diagnostics
+
+
+def _parse_redundancy_group(output: str) -> list:
+    """Parse 'show redundancy group' table into [{name, node_type, status}].
+
+    Expected format:
+        Node Router-Name   Node Type       Address           Status
+        -----------------  --------------  ----------------  ---------
+        routerA            Message-Router  host.example.com  Online
+        routerB            Monitor         host2.example.com Online
+          *                                                   (current node marker)
+    """
+    rows = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip header and separator lines
+        if re.match(r'^[-=]+', stripped) or re.match(r'^Node Router-Name', stripped, re.IGNORECASE):
+            continue
+        # Skip continuation/indented lines and the current-node asterisk marker
+        if line.startswith(' ') or stripped == '*' or stripped.startswith('* -'):
+            continue
+        # Parse: name  type  addr  status  (split on 2+ spaces)
+        # Strip trailing * from name — Solace appends * to mark the current node
+        # either on the name itself (e.g. "routerA*") or on a separate continuation
+        # line (the latter is handled by the leading-space skip above).
+        parts = re.split(r'\s{2,}', stripped)
+        if len(parts) >= 4:
+            rows.append({"name": parts[0].rstrip('*'), "node_type": parts[1], "status": parts[-1]})
+        elif len(parts) == 3:
+            rows.append({"name": parts[0].rstrip('*'), "node_type": parts[1], "status": parts[2]})
+    return rows
 
 
 def first_match(pattern: str, text: str, default: str = "Unknown") -> str:
@@ -83,14 +154,25 @@ def extract_context(folder: Path) -> dict:
     redundancy_out  = extract_command_output(diagnostics, "show redundancy")
     hardware_out    = extract_command_output(diagnostics, "show hardware detail")
 
-    router_name = first_match(r"Router Name\s*:\s*(\S+)", redundancy_out)
+    # Use show router-name first (most reliable); anchored to line start to avoid
+    # matching "Mate Router Name" which also contains "Router Name".
+    router_name_out = extract_command_output(diagnostics, "show router-name")
+    router_name = first_match(r"^Router Name\s*:\s*(\S+)", router_name_out)
     if router_name == "Unknown":
-        router_name = first_match(r"Router Name\s*:\s*(\S+)", diagnostics)
+        router_name = first_match(r"^Router Name\s*:\s*(\S+)", redundancy_out)
+    if router_name == "Unknown":
+        router_name = first_match(r"^Router Name\s*:\s*(\S+)", diagnostics)
 
     serial           = first_match(r"Chassis serial:\s*(\S+)", hardware_out)
     chassis_product  = first_match(r"Chassis Product #:\s*(\S+)", hardware_out, default="")
     version_out      = extract_command_output(diagnostics, "show version")
     solos_version    = first_match(r"Solace PubSub\+.*?Version\s+(\S+)", version_out, default="")
+    _model_m         = re.search(r"Solace PubSub\+\s+(\S+)\s+Version", version_out or diagnostics)
+    platform_type    = "appliance" if (_model_m and _model_m.group(1).isdigit()) else "software"
+
+    operating_mode_raw  = first_match(r"Operating Mode[ \t]*:[ \t]*(.+)", redundancy_out, default="")
+    operating_mode      = operating_mode_raw.strip()
+    is_monitor          = "monitor" in operating_mode.lower()
 
     redundancy_config   = first_match(r"Configuration Status[ \t]*:[ \t]*(\S+)", redundancy_out)
     redundancy_mode     = first_match(r"Redundancy Mode[ \t]*:[ \t]*(\S+)", redundancy_out)
@@ -218,6 +300,10 @@ def extract_context(folder: Path) -> dict:
             # Bridges found but none established — resolve against mate after all contexts built
             replication_site = "_down"
 
+    # Redundancy group membership (software brokers — show redundancy group)
+    redun_group_out  = extract_command_output(diagnostics, "show redundancy group")
+    redundancy_group = _parse_redundancy_group(redun_group_out) if redun_group_out else []
+
     # Additional context: message spool, redundancy status, config-sync
     spool_out    = extract_command_output(diagnostics, "show message-spool detail")
     spool_config = first_match(r"Config Status\s*:\s*(.+)", spool_out, default="").strip()
@@ -242,6 +328,10 @@ def extract_context(folder: Path) -> dict:
         "serial":          serial,
         "chassis_product": chassis_product,
         "solos_version":   solos_version,
+        "platform_type":   platform_type,
+        "operating_mode":  operating_mode,
+        "is_monitor":      is_monitor,
+        "redundancy_group": redundancy_group,
         "redundancy_mode": redundancy_mode,
         "role":             role,
         "redundancy_role":  redundancy_role,
@@ -263,10 +353,15 @@ def extract_context(folder: Path) -> dict:
 
 
 def print_context(ctx: dict, label: str = ""):
+    is_sw      = ctx.get("platform_type") == "software"
+    is_monitor = ctx.get("is_monitor", False)
+
     if ctx.get("standalone"):
-        suffix = " - Standalone Appliance"
+        suffix = " - Standalone"
+    elif is_monitor:
+        suffix = " - Monitor Node"
     elif ctx.get("redundancy_mode") in ("Active/Active", "Active/Standby"):
-        suffix = " - Redundant Configuration" if ctx.get("serial") == "Unknown" else " - Redundant Appliance"
+        suffix = " - Redundant Appliance" if ctx.get("platform_type") == "appliance" else " - Redundant Configuration"
     else:
         suffix = ""
     header = f"Broker Context — {label}{suffix}" if label else f"Broker Context{suffix}"
@@ -287,7 +382,8 @@ def print_context(ctx: dict, label: str = ""):
         left_lines.append(f"  {lbl:<{w}} : {value}")
 
     row("Router Name",       ctx['router_name'])
-    row("Serial Number",     ctx['serial'])
+    if not is_sw:
+        row("Serial Number",     ctx['serial'])
     if ctx.get('chassis_product'):
         row("Chassis Product #", ctx['chassis_product'])
     if ctx.get('solos_version'):
@@ -307,7 +403,9 @@ def print_context(ctx: dict, label: str = ""):
     redundancy_enabled_up = (
         redun_config.lower() == 'enabled' and redun_status.lower() == 'up'
     )
-    if redundancy_enabled_up:
+    if is_monitor:
+        rrow("Operating Role", "Monitoring Node")
+    elif redundancy_enabled_up:
         rrow("Redundancy Mode",     ctx['redundancy_mode'])
         rrow("Active-Standby Role", ctx['active_standby_role'])
         ad_role = f"AD-{ctx['redundancy_role']}" if ctx.get('redundancy_role') else ""
@@ -392,6 +490,137 @@ def _missing_mate_json(group):
             missing_role = "Backup" if role == "Primary" else "Primary" if role == "Backup" else "Mate"
             return [{"router_name": mate, "role": missing_role, "missing_gd": True}]
     return []
+
+
+def validate_ha_triplets(contexts: list):
+    """Validate HA triplets (Primary + Backup + Monitor) for software brokers.
+
+    Groups brokers by their shared redundancy-group membership, then for each
+    group shows a table of all three nodes and cross-validates that every
+    provided GD reports the same group composition.
+    """
+    if not contexts:
+        return []
+
+    # Group contexts that share at least one common redundancy-group member name.
+    ungrouped = list(range(len(contexts)))
+    triplet_groups = []
+    while ungrouped:
+        idx = ungrouped.pop(0)
+        ctx = contexts[idx]
+        group_names = {m["name"] for m in ctx.get("redundancy_group", [])}
+        group_names.add(ctx["router_name"])
+
+        same_group = [idx]
+        remaining = []
+        for other_idx in ungrouped:
+            other_ctx = contexts[other_idx]
+            other_names = {m["name"] for m in other_ctx.get("redundancy_group", [])}
+            other_names.add(other_ctx["router_name"])
+            if group_names & other_names:
+                same_group.append(other_idx)
+                group_names |= other_names
+            else:
+                remaining.append(other_idx)
+        ungrouped = remaining
+        triplet_groups.append(same_group)
+
+    print("\nHA Triplet Validation")
+    print("-" * 50)
+
+    TRIPLET_HEADERS = ["Node Type", "Router", "Status", "Info"]
+
+    def _node_type_rank(node_type: str) -> int:
+        t = node_type.lower()
+        if "primary" in t:
+            return 0
+        if "backup" in t:
+            return 1
+        if "monitor" in t:
+            return 2
+        return 3
+
+    def _enrich_node_type(member: dict, ctx_by_name: dict) -> str:
+        """For Message-Router nodes, prefix with Primary/Backup if context is available."""
+        node_type = member.get("node_type", "")
+        if node_type.lower() == "message-router":
+            ctx = ctx_by_name.get(member["name"])
+            if ctx:
+                role = ctx.get("active_standby_role", "")
+                if role in ("Primary", "Backup"):
+                    return f"{role} {node_type}"
+        return node_type
+
+    triplets_json = []
+
+    for n, group_indices in enumerate(triplet_groups, 1):
+        group_contexts = [contexts[i] for i in group_indices]
+        ctx_by_name = {ctx["router_name"]: ctx for ctx in group_contexts}
+
+        # Build the canonical member list from the first context that has one
+        canonical_group = next(
+            (ctx.get("redundancy_group") for ctx in group_contexts if ctx.get("redundancy_group")),
+            None
+        )
+        if not canonical_group:
+            canonical_group = [
+                {"name": ctx["router_name"], "node_type": "Unknown", "status": "Unknown"}
+                for ctx in group_contexts
+            ]
+
+        # Cross-validate: all provided GDs should agree on group membership
+        all_reported = [ctx.get("redundancy_group", []) for ctx in group_contexts if ctx.get("redundancy_group")]
+        if len(all_reported) > 1:
+            ref_names = {m["name"] for m in all_reported[0]}
+            for other in all_reported[1:]:
+                if {m["name"] for m in other} != ref_names:
+                    print(f"  [WARNING] Triplet {n}: Redundancy group membership differs across provided GDs.")
+                    break
+            # Check per-node status consistency
+            for member in canonical_group:
+                statuses = set()
+                for grp in all_reported:
+                    for m in grp:
+                        if m["name"] == member["name"]:
+                            statuses.add(m["status"])
+                            break
+                if len(statuses) > 1:
+                    print(f"  [WARNING] Triplet {n}: Node '{member['name']}' has conflicting statuses across GDs: {statuses}")
+
+        # Enrich node types first, then sort by enriched type (Primary → Backup → Monitor)
+        entries = []
+        for member in canonical_group:
+            name      = member["name"]
+            node_type = _enrich_node_type(member, ctx_by_name)
+            status    = member["status"]
+            has_gd    = name in ctx_by_name
+            info      = "" if has_gd else "Missing GD"
+            entries.append((node_type, name, status, info))
+        entries.sort(key=lambda e: _node_type_rank(e[0]))
+
+        rows = []
+        brokers_json = []
+        for (node_type, name, status, info) in entries:
+            rows.append([node_type, name, status, info])
+            brokers_json.append({
+                "router_name": name,
+                "node_type":   node_type,
+                "status":      status,
+                "missing_gd":  info == "Missing GD",
+            })
+
+        mode_label = ""
+        for ctx in group_contexts:
+            mode = ctx.get("redundancy_mode", "")
+            if mode and mode not in ("N/A", "Unknown"):
+                mode_label = f" - {mode}"
+                break
+
+        print(f"\n  HA Triplet {n}{mode_label}")
+        print(_draw_table(TRIPLET_HEADERS, [rows]))
+        triplets_json.append({"triplet_number": n, "brokers": brokers_json})
+
+    return triplets_json
 
 
 def validate_replication_pairs(contexts: list):
@@ -644,7 +873,17 @@ def main():
             print_context(ctx, label)
 
     repl_pairs = validate_replication_pairs(contexts)
-    ha_pairs = validate_ha_pairs(contexts)
+
+    # Choose HA validation strategy based on platform type of provided brokers
+    platform_types = [ctx.get("platform_type", "appliance") for ctx in contexts]
+    is_software = platform_types.count("software") > len(platform_types) / 2
+
+    ha_pairs = []
+    ha_triplets = []
+    if is_software:
+        ha_triplets = validate_ha_triplets(contexts)
+    else:
+        ha_pairs = validate_ha_pairs(contexts)
 
     output_path = data_dir / "router_context.json"
     with open(output_path, "w") as f:
@@ -656,6 +895,12 @@ def main():
         with open(repl_path, "w") as f:
             json.dump(repl_pairs, f, indent=2)
         print(f"Replication pairs written to {repl_path}")
+
+    if ha_triplets:
+        ha_path = data_dir / "HA_triplet_validation.json"
+        with open(ha_path, "w") as f:
+            json.dump(ha_triplets, f, indent=2)
+        print(f"HA triplets written to {ha_path}")
 
     if ha_pairs:
         ha_path = data_dir / "HA_pair_validation.json"
