@@ -32,12 +32,14 @@ DECRYPT_CMS = SCRIPT_DIR / "decrypt-cms.exe"
 # ---------------------------------------------------------------------------
 
 def strip_extensions(p: Path) -> Path:
-    """Return base path with any .p7m / .tgz / .tar.gz suffix stripped."""
+    """Return base path with any .p7m / .tgz / .tar.gz / .tar suffix stripped."""
     name = p.name
     if name.endswith(".p7m"):
         name = name[:-4]          # strip .p7m → may still end in .tgz or .tgz (N)
     if ".tgz" in name or ".tar.gz" in name:
         name = name[: name.find(".t")]    # strip from the first .tgz/.tar part
+    elif name.endswith(".tar"):
+        name = name[:-4]          # strip plain .tar
     return p.parent / name
 
 
@@ -50,20 +52,23 @@ def resolve(arg: str):
     p        = Path(arg)
     base     = strip_extensions(p)
     tgz      = Path(str(base) + ".tgz")
+    tar_gz   = Path(str(base) + ".tar.gz")
+    tar      = Path(str(base) + ".tar")
     p7m      = Path(str(base) + ".tgz.p7m")
     p7m_tgz  = Path(str(base) + ".tgz.p7m.tgz")
 
-    # Check exact input first, then try permutations in order: folder → .tgz → .tgz.p7m → .tgz.p7m.tgz
+    # Check exact input first, then try permutations in order:
+    # folder → .tgz → .tar.gz → .tar → .tgz.p7m → .tgz.p7m.tgz
     # Also try appending .p7m to the exact input — handles names like "file.tgz (1)" → "file.tgz (1).p7m"
     p_p7m = Path(str(p) + ".p7m")
-    candidates = [p, p_p7m, base, tgz, p7m, p7m_tgz]
+    candidates = [p, p_p7m, base, tgz, tar_gz, tar, p7m, p7m_tgz]
     for candidate in candidates:
         if candidate.is_dir():
             return candidate, "folder"
         if candidate.exists():
             if candidate.name.endswith(".p7m"):
                 return candidate, "p7m"
-            if candidate.name.endswith(".tgz") or candidate.name.endswith(".tar.gz"):
+            if candidate.name.endswith(".tgz") or candidate.name.endswith(".tar.gz") or candidate.name.endswith(".tar"):
                 return candidate, "tgz"
 
     return None, None
@@ -92,11 +97,11 @@ def decrypt(p7m_path: Path) -> Path:
 
 
 def extract(tgz_path: Path) -> Path:
-    """Extract a .tgz archive into its parent directory."""
+    """Extract a .tgz, .tar.gz, or .tar archive into its parent directory."""
     dest = tgz_path.parent
 
     try:
-        with tarfile.open(tgz_path, "r:gz") as tar:
+        with tarfile.open(tgz_path, "r:*") as tar:
             tar.extractall(dest)
     except Exception as e:
         print(f"[ERROR] Extraction failed: {e}")
@@ -136,8 +141,10 @@ def handle(arg: str) -> str | None:
             current, current_kind = tgz_path, "tgz"
 
         elif current_kind == "tgz":
-            # Final folder is named after everything before the first .tgz
+            # Final folder is named after everything before the first tar extension
             idx = current.name.find(".tgz")
+            if idx == -1:
+                idx = current.name.find(".tar")
             folder = current.parent / (current.name[:idx] if idx != -1 else current.name)
             if folder.is_dir():
                 return folder.name
@@ -171,6 +178,15 @@ def auto_discover_gd(search_dir: Path) -> list[str]:
         base = strip_extensions(p).name
         if base not in candidates:
             candidates[base] = (1, str(p))
+    for p in search_dir.glob("gather-diagnostics*.tar.gz"):
+        base = strip_extensions(p).name
+        if base not in candidates:
+            candidates[base] = (1, str(p))
+    for p in search_dir.glob("gather-diagnostics*.tar"):
+        if not p.name.endswith(".tar.gz"):   # .tar glob won't match .tar.gz, but be explicit
+            base = strip_extensions(p).name
+            if base not in candidates:
+                candidates[base] = (1, str(p))
     for p in search_dir.iterdir():
         if p.is_dir() and p.name.startswith("gather-diagnostics"):
             base = strip_extensions(p).name

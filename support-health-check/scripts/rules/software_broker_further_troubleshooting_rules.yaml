@@ -2,4 +2,199 @@
 # Per-section further troubleshooting steps for software broker FAILs.
 # Structure mirrors appliance_further_troubleshooting_rules.yaml.
 
-sections: {}
+# When a section key fails, also run the listed additional sections.
+triggers:
+  "6.1": ["7.1"]
+  "6.2": ["7.1"]
+
+# A section listed here is skipped entirely if any of its required logs are absent.
+section_requires:
+  "7.1": ["consul.log"]
+
+troubleshooting:
+
+  # 1.0, 1.1: not applicable — only recommendation is an upgrade
+
+  "2.1":
+    - description: "[Core File Produced]"
+      source: "debug.log"
+      pattern: "Child process died.*core dump produced"
+
+    - description: "Cause 1 - Operator or Host-Initiated Shutdown"
+      source: "debug.log"
+      pattern: "System shutdown initiated by"
+
+    - description: "Cause 2 - External Termination Signal"
+      source: "debug.log"
+      pattern: "Received Signal 17"
+
+    - description: "Cause 3 - Mate takeover not confirmed"
+      source: "debug.log"
+      pattern: "Did not receive confirmation that the mate took over activity"
+
+    - description: "Cause 4 - Unresponsive Message Spool Disk"
+      sources:
+        - "debug.log"
+        - "system.log"
+      pattern: "(?i)A message spool disk is unresponsive"
+
+    - description: "Cause 5 - Software Bug"
+      source: "debug.log"
+      pattern: "Error detected"
+
+    - description: "Cause 6 - Processor IERR"
+      source: "debug.log"
+      pattern: "Processor: IERR"
+
+    - description: "Cause 7 - PKO Lockup Causing NAB Halt"
+      sources:
+        - "system.log"
+        - "debug.log"
+      patterns:
+        - 'SYSTEM_SYSTEM_SHUTDOWN_INITIATED:.*reason \(NAB halt detected\)'
+        - 'FATAL\s+Core \d+: MonitorPkoTimer::execute: no PKO output detected for \d+ms'
+      min_matches_per_pattern: 1
+      next_line_pattern: 'FATAL\s+NAB halt detected - shutting down'
+      next_line_applies_to: 'MonitorPkoTimer::execute: no PKO output detected'
+
+  # 2.2, 2.3: not applicable — cannot be troubleshooted further
+
+  "5.1":
+    - description: "Cause 1 - Message Spool is Full on an HA System"
+      source: "system.log"
+      pattern: "SYSTEM_AD_DISK_USAGE_EXCEEDED"
+
+    - description: "Cause 2 - Message Spool Possibly Corrupt"
+      source: "debug.log"
+      patterns:
+        - "WARN\\s+Begin move-to-disk errored state:"
+        - "WARN\\s+Failed to move messages to disk:"
+      min_matches_per_pattern: 1
+
+    - description: "Cause 3 - Spool Files Threshold Reached/Exceeded"
+      source: "system.log"
+      patterns:
+        - "SYSTEM_AD_SPOOL_FILES_EXCEEDED"
+        - "SYSTEM_AD_SPOOL_FILES_HIGH"
+
+    - description: "Cause 4 - HA Backup Unable to Write to Disk (ADB Link State)"
+      source: "system.log"
+      patterns:
+        - "SYSTEM_LINK_ADB_LINK_DOWN"
+        - "SYSTEM_LINK_ADB_LINK_UP"
+
+    - description: "Cause 4 (continued) - Health Notifications at Time of ADB Link Down"
+      source: "system.log"
+      pattern: "SYSTEM_SYSTEM_HEALTH_NONCRITICAL_NOTIFICATION"
+
+    - description: "Cause 5 - Message Spool Quota Reached"
+      source: "system.log"
+      pattern: "SYSTEM_AD_MSG_SPOOL_QUOTA_EXCEED"
+
+  # 6.1.A/B/C/D all fail as a group — keyed by group key "6.1"
+  "6.1":
+    - description: "Cause 1 - Virtual Router in Standby Mode"
+      source: "system.log"
+      pattern: "SYSTEM_HA_VR_STATE_STANDBY"
+
+    - description: "Cause 2 - Slow Disk (closeSocketErrno, Contact RND)"
+      source: "debug.log"
+      pattern: 'WARN\s+closeSocketErrno: unknown reasons \d+ \(Connection timed out\)'
+
+    # NOTE: "direct next line" pairing cannot be enforced — fires if 3+ of each pattern exist anywhere in the log
+    - description: "Cause 3 - Flapping ADB Link (3+ UP/DOWN oscillations)"
+      source: "system.log"
+      patterns:
+        - "SYSTEM_LINK_ADB_HELLO_PROTOCOL_UP"
+        - "SYSTEM_LINK_ADB_HELLO_PROTOCOL_DOWN"
+      min_matches_per_pattern: 3
+
+    - description: "Cause 4 - Clock Skew Between Mates"
+      source: "system.log"
+      pattern: "SYSTEM_HA_TIME_SKEW:"
+
+    - description: "Cause 5 - Consul Fails to Restore Database Snapshot"
+      source: "kernel.log"
+      pattern: 'msg type <\d+> is a Consul Enterprise log entry\. Consul OSS cannot restore it'
+
+    - description: "Cause 6 - Brokers Offline Too Long to Rejoin Cluster"
+      source: "kernel.log"
+      pattern: "refusing to rejoin cluster because server has been offline for more than the configured server_rejoin_age_max"
+
+    - description: "Cause 7 - Redundancy Group Node Name Mismatch"
+      source: "debug.log"
+      pattern: "Could not determine self node configuration"
+
+  "6.2":
+    - description: "Cause 1 - Config-sync Out-Of-Sync (Disk Usage / Egress / Unacked)"
+      source: "system.log"
+      patterns:
+        - "SYSTEM_AD_DISK_USAGE_EXCEEDED"
+        - "SYSTEM_AD_MAX_EGRESS_FLOWS_EXCEEDED"
+        - "SYSTEM_AD_DELIVERED_UNACKED_MSGS_EXCEED"
+
+    - description: "Cause 2 - Table Summary Timeout / Mate Router Name Incorrect (system.log)"
+      source: "system.log"
+      patterns:
+        - "SYSTEM_AD_MSG_COUNT_UTILIZATION_HIGH"
+        - "SYSTEM_AD_MSG_COUNT_UTILIZATION_EXCEED"
+        - "SYSTEM_CFGSYNC_DOWN"
+        - "SYSTEM_AD_MSG_SPOOL_QUOTA_EXCEED"
+        - "VPN_AD_MSG_SPOOL_QUOTA_EXCEED"
+
+    - description: "Cause 2 (continued) - VPN Config-sync Send Rejected (debug.log)"
+      source: "debug.log"
+      pattern: "VPN_CFGSYNC_STATE_CHANGE.*From 'In-Sync' to 'Out-Of-Sync' reason 'Send Rejected'"
+
+    - description: "Cause 3 - Broker Ran Out of Disk Space"
+      source: "debug.log"
+      pattern: 'ERROR fclose\(\) failed: Errno\(\d+\) No space left on device'
+
+    - description: "Cause 4 - Incoming Connection Buffer Too Big / Broker Running Too Slow"
+      sources:
+        - "debug.log"
+        - "kernel.log"
+      pattern: 'connect failed from 127\.0\.0\.1:\d+ - Service Unavailable: Service Unavailable'
+
+  # 7.1: Consul troubleshooting — runs automatically when 6.1 or 6.2 fails,
+  # provided consul.log was found in the GD bundle (software broker only).
+  "7.1":
+    - description: "Cause 1 - Failed Writing to AD Because Node is Active"
+      source: "consul.log"
+      pattern: "requestLockAd in commitTransaction: failed writing to mate"
+
+    - description: "Cause 2 - Problems Writing to ADB (HT Update Delay)"
+      source: "consul.log"
+      pattern: 'AdFg: Wait \d+ seconds for HT update complete'
+
+    - description: "Cause 3 - Node Rejoined Group; Remaining Nodes Cannot Make Election Progress Without It"
+      source: "consul.log"
+      pattern: "Using previous redundancy session"
+
+    - description: "Cause 4 - Hardware Change in HA Triplet Causing Election Failure (SOL-24888)"
+      source: "consul.log"
+      patterns:
+        - 'consul: error getting server health from "[^"]+": last request still outstanding'
+        - 'consul\[\d+\]: http: Request GET /v1/operator/raft/configuration, error: No cluster leader from=@'
+
+    - description: "Cause 5 - Clock Skew Between HA Cluster Nodes (Expired TLS Certificate)"
+      source: "consul.log"
+      pattern: "consul.rpc: failed to read byte: tls: failed to verify client's certificate: x509: certificate has expired or is not yet valid"
+
+    - description: "Cause 6 - IP Address Changed for an HA Node"
+      sources:
+        - "system.log"
+        - "consul.log"
+      patterns:
+        - 'SYSTEM_HA_REDUN_GROUP_NODE_LEFT:.*is no longer reachable:'
+        - 'memberlist: Conflicting address for .+\. Mine: .+ Theirs: .+'
+        - 'Name conflict for .+ both .+ and .+ are claiming'
+      min_matches_per_pattern: 1
+
+    - description: "Cause 7 - Encryption Key Mismatch After Upgrade (9.6 -> 9.10)"
+      source: "consul.log"
+      pattern: "memberlist: failed to receive: No installed keys could decrypt the message from="
+
+    - description: "Cause 8 - HA Node Offline Longer Than server_rejoin_age_max"
+      source: "consul.log"
+      pattern: 'refusing to rejoin cluster because server has been offline for more than the configured server_rejoin_age_max \(\S+\) -- consider wiping your data dir'

@@ -40,6 +40,17 @@ troubleshooting:
       source: "debug.log"
       pattern: "Processor: IERR"
 
+    - description: "Cause 7 - PKO Lockup Causing NAB Halt"
+      sources:
+        - "system.log"
+        - "debug.log"
+      patterns:
+        - 'SYSTEM_SYSTEM_SHUTDOWN_INITIATED:.*reason \(NAB halt detected\)'
+        - 'FATAL\s+Core \d+: MonitorPkoTimer::execute: no PKO output detected for \d+ms'
+      min_matches_per_pattern: 1
+      next_line_pattern: 'FATAL\s+NAB halt detected - shutting down'
+      next_line_applies_to: 'MonitorPkoTimer::execute: no PKO output detected'
+
   # 2.2 and 2.3: not applicable
 
   "3.1":

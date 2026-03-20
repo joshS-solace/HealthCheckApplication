@@ -47,13 +47,25 @@ def load_rules(rules_path: Path) -> dict:
         return yaml.safe_load(f)
 
 
-def load_troubleshooting_rules(path: Path) -> dict:
-    """Load appliance_further_troubleshooting_rules.yaml. Returns empty dict if file is missing."""
+def load_troubleshooting_rules(path: Path) -> tuple:
+    """
+    Load a further-troubleshooting rules file.
+    Returns (troubleshooting_steps, section_requires, triggers).
+      troubleshooting_steps : dict[section_key -> list[step]]
+      section_requires      : dict[section_key -> list[log_name]] — skip section if any log absent
+      triggers              : dict[section_key -> list[section_key]] — also run these on FAIL
+    """
     if not path.exists():
-        return {}
+        return {}, {}, {}
     with open(path, "r") as f:
         data = yaml.safe_load(f)
-    return data.get("troubleshooting", {}) if data else {}
+    if not data:
+        return {}, {}, {}
+    return (
+        data.get("troubleshooting", {}),
+        data.get("section_requires", {}),
+        data.get("triggers", {}),
+    )
 
 
 def resolve_folder(folder: Path) -> Path:
@@ -139,6 +151,18 @@ def load_logs(folder: Path) -> dict:
         if re.match(r".+\.log\.\d+$", entry.name):
             with open(entry, "r", errors="replace") as f:
                 logs[entry.name] = f.read()
+
+    # consul.log — software broker only; probe multiple candidate paths silently
+    for candidate in [
+        folder / "var" / "log" / "solace" / "consul.log",
+        folder / "usr" / "sw" / "jail" / "configs" / "consul.log",
+        folder / "container_solace" / "var" / "log" / "solace" / "consul.log",
+        folder / "container_solace" / "usr" / "sw" / "jail" / "configs" / "consul.log",
+    ]:
+        if candidate.exists():
+            with open(candidate, "r", errors="replace") as f:
+                logs["consul.log"] = f.read()
+            break
 
     return logs
 
@@ -376,11 +400,17 @@ def run_troubleshooting_steps(section: str, logs: dict, reference_date: datetime
                 expanded.extend(rotated)
             return expanded
 
+        next_line_pat = step.get("next_line_pattern")
+        # next_line_applies_to: if set, the adjacency check only applies to lines matching
+        # this pattern; other matched lines are included freely.
+        next_line_applies_to = step.get("next_line_applies_to")
+
         matched = []
         for source in expand_sources(source_list):
             if source not in logs:
                 continue
-            for line in logs[source].splitlines():
+            all_lines = logs[source].splitlines()
+            for i, line in enumerate(all_lines):
                 line = line.strip()
                 if not line:
                     continue
@@ -389,6 +419,18 @@ def run_troubleshooting_steps(section: str, logs: dict, reference_date: datetime
                     if line_date and line_date < cutoff:
                         continue
                 if not patterns or any(re.search(p, line, re.IGNORECASE) for p in patterns):
+                    if next_line_pat:
+                        scoped = next_line_applies_to and not re.search(next_line_applies_to, line, re.IGNORECASE)
+                        if not scoped:
+                            # Adjacency check applies to this line
+                            next_line = None
+                            for j in range(i + 1, min(i + 4, len(all_lines))):
+                                nl = all_lines[j].strip()
+                                if nl:
+                                    next_line = nl
+                                    break
+                            if not next_line or not re.search(next_line_pat, next_line, re.IGNORECASE):
+                                continue
                     matched.append({
                         "source": source,
                         "timestamp": extract_log_timestamp(line),
@@ -766,6 +808,34 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
 
 
 # ---------------------------------------------------------------------------
+# Triggered troubleshooting
+# ---------------------------------------------------------------------------
+
+def _run_triggered_sections(
+    section_key: str,
+    logs: dict,
+    reference_date,
+    troubleshooting_rules: dict,
+    section_requires: dict,
+    triggers: dict,
+) -> list:
+    """
+    For a failed section, run any additional troubleshooting sections declared
+    in `triggers[section_key]`, skipping any whose required logs are absent.
+    Returns a flat list of context entries to append to troubleshooting_context.
+    """
+    extra = []
+    for triggered_key in triggers.get(section_key, []):
+        required = section_requires.get(triggered_key, [])
+        if any(r not in logs for r in required):
+            continue
+        steps = troubleshooting_rules.get(triggered_key, [])
+        if steps:
+            extra.extend(run_troubleshooting_steps(triggered_key, logs, reference_date, steps))
+    return extra
+
+
+# ---------------------------------------------------------------------------
 # Section runner
 # ---------------------------------------------------------------------------
 
@@ -897,7 +967,7 @@ def run(folder: Path, router_name: str = None, output_dir: Path = None) -> bool:
     print(f"Rules file         : {rules_path.resolve()}")
 
     rules = load_rules(rules_path).get("rules", [])
-    troubleshooting_rules = load_troubleshooting_rules(troubleshooting_path)
+    troubleshooting_rules, section_requires, triggers = load_troubleshooting_rules(troubleshooting_path)
 
     reference_date, date_is_fallback = find_latest_log_date(logs)
     print(f"Loaded {len(rules)} health check rules.")
@@ -957,10 +1027,13 @@ def run(folder: Path, router_name: str = None, output_dir: Path = None) -> bool:
                 "status": "PASS" if passed else "FAIL",
                 "failures": failures,
             }
-            if not passed and section in troubleshooting_rules:
-                result["troubleshooting_context"] = run_troubleshooting_steps(
-                    section, logs, reference_date, troubleshooting_rules[section]
-                )
+            if not passed:
+                ctx = []
+                if section in troubleshooting_rules:
+                    ctx.extend(run_troubleshooting_steps(section, logs, reference_date, troubleshooting_rules[section]))
+                ctx.extend(_run_triggered_sections(section, logs, reference_date, troubleshooting_rules, section_requires, triggers))
+                if ctx:
+                    result["troubleshooting_context"] = ctx
             json_results.append(result)
 
         else:
@@ -1029,10 +1102,12 @@ def run(folder: Path, router_name: str = None, output_dir: Path = None) -> bool:
                     "status": "FAIL",
                     "failures": all_failures,
                 }
+                ctx = []
                 if group_key in troubleshooting_rules:
-                    group_result["troubleshooting_context"] = run_troubleshooting_steps(
-                        group_key, logs, reference_date, troubleshooting_rules[group_key]
-                    )
+                    ctx.extend(run_troubleshooting_steps(group_key, logs, reference_date, troubleshooting_rules[group_key]))
+                ctx.extend(_run_triggered_sections(group_key, logs, reference_date, troubleshooting_rules, section_requires, triggers))
+                if ctx:
+                    group_result["troubleshooting_context"] = ctx
                 json_results.append(group_result)
             print()
 

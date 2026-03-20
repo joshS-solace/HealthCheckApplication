@@ -387,7 +387,7 @@ def print_context(ctx: dict, label: str = ""):
     if ctx.get('chassis_product'):
         row("Chassis Product #", ctx['chassis_product'])
     if ctx.get('solos_version'):
-        row("SolOS Version",     ctx['solos_version'])
+        row("SolOS",             ctx['solos_version'])
     if spool_config:
         row("Message Spool", spool_config + (f" / {spool_oper}" if spool_oper else ""))
     if redun_config not in ('', 'Unknown'):
@@ -528,7 +528,7 @@ def validate_ha_triplets(contexts: list):
     print("\nHA Triplet Validation")
     print("-" * 50)
 
-    TRIPLET_HEADERS = ["Node Type", "Router", "Status", "Info"]
+    TRIPLET_HEADERS = ["Node Type", "HA Role", "Router", "Status", "Info"]
 
     def _node_type_rank(node_type: str) -> int:
         t = node_type.lower()
@@ -597,13 +597,18 @@ def validate_ha_triplets(contexts: list):
             status    = member["status"]
             has_gd    = name in ctx_by_name
             info      = "" if has_gd else "Missing GD"
-            entries.append((node_type, name, status, info))
+            if node_type.lower() == "monitor":
+                ha_role = "N/A"
+            else:
+                ctx = ctx_by_name.get(name)
+                ha_role = broker_site_label(ctx) if ctx else ""
+            entries.append((node_type, ha_role, name, status, info))
         entries.sort(key=lambda e: _node_type_rank(e[0]))
 
         rows = []
         brokers_json = []
-        for (node_type, name, status, info) in entries:
-            rows.append([node_type, name, status, info])
+        for (node_type, ha_role, name, status, info) in entries:
+            rows.append([node_type, ha_role, name, status, info])
             brokers_json.append({
                 "router_name": name,
                 "node_type":   node_type,
@@ -694,19 +699,37 @@ def validate_replication_pairs(contexts: list):
     for og in other_groups:
         matched_pairs.append((og, None))
 
-    REPL_HEADERS = ["HA Role", "Router", "Repl Site Status", "Info"]
+    platform_types = [c.get("platform_type", "appliance") for c in contexts]
+    is_software = platform_types.count("software") > len(platform_types) / 2
+    monitor_ctxs = [c for c in contexts if c.get("is_monitor")] if is_software else []
 
-    def _repl_rows_for_group(group, site_label):
+    REPL_HEADERS = ["Repl Site Status", "Router", "HA Role", "Info"]
+
+    def _repl_rows_for_group(group):
+        """Build display rows for a site group (appliance path). Missing mate appended inline."""
         rows = []
         for ctx in sorted(group, key=_broker_order):
-            rows.append([broker_site_label(ctx), ctx["router_name"], ctx.get("replication_site", ""), ""])
+            rows.append([ctx.get("replication_site", ""), ctx["router_name"], broker_site_label(ctx), ""])
         if len(group) == 1:
             mate = group[0].get("mate_router", "")
             if mate:
                 role = group[0].get("redundancy_role", "")
                 missing_role = "Backup" if role == "Primary" else "Primary" if role == "Backup" else "Mate"
-                rows.append([missing_role, mate, "-", "Missing GD"])
+                rows.append(["-", mate, missing_role, "Missing GD"])
         return rows
+
+    def _find_monitor(ag, bg):
+        """Find the monitor node belonging to the same HA triplet as this replication pair."""
+        pair_names = set()
+        for g in [ag, bg]:
+            if g:
+                pair_names.update(c["router_name"] for c in g)
+        for mon in monitor_ctxs:
+            mon_names = {m["name"] for m in mon.get("redundancy_group", [])}
+            mon_names.add(mon["router_name"])
+            if pair_names & mon_names:
+                return mon
+        return None
 
     pairs_json = []
     for n, (ag, bg) in enumerate(matched_pairs, 1):
@@ -715,30 +738,85 @@ def validate_replication_pairs(contexts: list):
 
         print(f"\n  Replication Pair {n}")
         pair = {"pair_number": n}
-        primary_rows = []
-        backup_rows = []
 
-        if ag is not None:
-            primary_rows = _repl_rows_for_group(ag, "Active")
-            pair["active_site"] = _group_to_json(ag) + _missing_mate_json(ag)
+        if is_software:
+            # Software brokers: all present nodes first (including monitor), missing GD rows at end
+            present_rows = []
+            missing_rows = []
+            all_present_names = {c["router_name"] for g in [ag, bg] if g for c in g}
 
-        if bg is not None:
-            backup_rows = _repl_rows_for_group(bg, "Standby")
-            pair["standby_site"] = _group_to_json(bg) + _missing_mate_json(bg)
+            # Consolidated repl site status: prefer any non-Down value; fall back to Down
+            all_ha_ctxs = sorted([ctx for g in [ag, bg] if g for ctx in g], key=_broker_order)
+            site_statuses = [ctx.get("replication_site", "") for ctx in all_ha_ctxs]
+            non_down = [s for s in site_statuses if s and s.lower() != "down"]
+            consolidated_site = non_down[0] if non_down else ("Down" if any(site_statuses) else "")
 
-        # Infer missing opposite site from replication_mate
-        if ag is not None and not backup_rows:
-            repl_mate = ag[0].get("replication_mate", "")
-            if repl_mate:
-                backup_rows = [["-", repl_mate, "-", "Missing GD"]]
-                pair["standby_site"] = [{"router_name": repl_mate, "missing_gd": True}]
-        elif bg is not None and not primary_rows:
-            repl_mate = bg[0].get("replication_mate", "")
-            if repl_mate:
-                primary_rows = [["-", repl_mate, "-", "Missing GD"]]
-                pair["active_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+            # Only the AD-Active broker shows the consolidated status
+            ad_active = next((ctx["router_name"] for ctx in all_ha_ctxs if ctx.get("redundancy_role") == "Active"), None)
 
-        row_groups = [g for g in [primary_rows, backup_rows] if g]
+            for ctx in all_ha_ctxs:
+                repl_site = consolidated_site if ctx["router_name"] == ad_active else ""
+                present_rows.append([repl_site, ctx["router_name"], broker_site_label(ctx), ""])
+
+            # Missing HA mate within a site group
+            for group in [ag, bg]:
+                if group is None or len(group) != 1:
+                    continue
+                mate = group[0].get("mate_router", "")
+                if mate and mate not in all_present_names:
+                    role = group[0].get("redundancy_role", "")
+                    missing_role = "Backup" if role == "Primary" else "Primary" if role == "Backup" else "Mate"
+                    missing_rows.append(["-", mate, missing_role, "Missing GD"])
+
+            monitor = _find_monitor(ag, bg)
+            if monitor:
+                present_rows.append(["", monitor["router_name"], "N/A", ""])
+
+            if ag is not None:
+                pair["active_site"] = _group_to_json(ag) + _missing_mate_json(ag)
+            if bg is not None:
+                pair["standby_site"] = _group_to_json(bg) + _missing_mate_json(bg)
+
+            # Infer missing entire opposite site
+            if ag is not None and bg is None:
+                repl_mate = ag[0].get("replication_mate", "")
+                if repl_mate and repl_mate not in all_present_names and not any(r[1] == repl_mate for r in missing_rows):
+                    missing_rows.append(["-", repl_mate, "-", "Missing GD"])
+                    pair["standby_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+            elif bg is not None and ag is None:
+                repl_mate = bg[0].get("replication_mate", "")
+                if repl_mate and repl_mate not in all_present_names and not any(r[1] == repl_mate for r in missing_rows):
+                    missing_rows.append(["-", repl_mate, "-", "Missing GD"])
+                    pair["active_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+
+            row_groups = [g for g in [present_rows, missing_rows] if g]
+
+        else:
+            # Appliances: original site-grouped structure, reordered columns
+            primary_rows = []
+            backup_rows = []
+
+            if ag is not None:
+                primary_rows = _repl_rows_for_group(ag)
+                pair["active_site"] = _group_to_json(ag) + _missing_mate_json(ag)
+            if bg is not None:
+                backup_rows = _repl_rows_for_group(bg)
+                pair["standby_site"] = _group_to_json(bg) + _missing_mate_json(bg)
+
+            # Infer missing opposite site from replication_mate
+            if ag is not None and not backup_rows:
+                repl_mate = ag[0].get("replication_mate", "")
+                if repl_mate:
+                    backup_rows = [["-", repl_mate, "-", "Missing GD"]]
+                    pair["standby_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+            elif bg is not None and not primary_rows:
+                repl_mate = bg[0].get("replication_mate", "")
+                if repl_mate:
+                    primary_rows = [["-", repl_mate, "-", "Missing GD"]]
+                    pair["active_site"] = [{"router_name": repl_mate, "missing_gd": True}]
+
+            row_groups = [g for g in [primary_rows, backup_rows] if g]
+
         if row_groups:
             print(_draw_table(REPL_HEADERS, row_groups))
 
@@ -868,8 +946,14 @@ def main():
             else:
                 ctx["replication_site"] = "Down"
 
+    try:
+        _plugin_json = Path(__file__).parent.parent / ".claude-plugin" / "plugin.json"
+        _version = "v" + json.load(open(_plugin_json)).get("version", "?")
+    except Exception:
+        _version = ""
+
     print("=" * 50)
-    print("Solace Broker Context")
+    print(f"Solace Broker Context ({_version})" if _version else "Solace Broker Context")
     print("=" * 50)
 
     multi = len(results) > 1

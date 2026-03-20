@@ -20,12 +20,12 @@ Please provide one or more router names to analyze.
 Then stop — do not proceed with the steps below.
 
 IMPORTANT: Do NOT use Glob or Search to find scripts. All scripts are at a known, fixed path. Use this exact path for all script references below:
-`~/.claude/plugins/marketplaces/support-marketplace/plugins/support-health-check/scripts`
+`./support-health-check/scripts`
 
 Steps:
 1. Read `./router_context.json` from the current working directory. If $ARGUMENTS is `all`, use every router in the file. Otherwise find the `full_path` for each named router; warn and skip any name not found.
 2. For each matched router, run the full pipeline. You may run multiple routers in parallel since each writes its own results file:
-   a. Run `python ~/.claude/plugins/marketplaces/support-marketplace/plugins/support-health-check/scripts/health_check.py [full_path] --router-name [router_name] --output-dir .`, then read `./health_check_output_[router_name].txt`. Display the result using this format:
+   a. Run `python ./support-health-check/scripts/health_check.py [full_path] --router-name [router_name] --output-dir .`, then read `./health_check_output_[router_name].txt`. Display the result using this format:
       - Print the router name as a bold header (e.g. `**FFGCGEMEASOLAPL01P**`)
       - Under it, list every `[INFO]`, `[WARNING]`, `[FAIL]`, and `[GREP MATCH]` line from the file — indented, flat (no section headers).
       - Deduplicate: if an identical line appears in both the health check section and the troubleshoot report section, only show it once

@@ -28,6 +28,23 @@ With no arguments, the plugin auto-discovers gather-diagnostics files (`*.tgz.p7
 
 Runs health checks on the named routers and searches Confluence for KBAs matching any failures.
 
+## Permissions setup
+
+The plugin runs Python scripts on your behalf. To avoid approval prompts on every run, add the following to your project's `.claude/settings.json` (create it if it doesn't exist):
+
+```json
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(python3 *)"
+    ]
+  }
+}
+```
+
+If `.claude/settings.json` already exists, merge the `allow` entries in.
+
 ## Atlassian MCP (Confluence Search)
 
 The plugin includes a `.mcp.json` that configures the Atlassian MCP server for Claude Code. This enables Confluence KBA search during analysis.

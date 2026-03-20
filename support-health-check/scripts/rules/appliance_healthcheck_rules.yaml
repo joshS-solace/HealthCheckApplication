@@ -68,6 +68,9 @@ rules:
       - type: contains
         expected: "Last Restart Reason"
         failure_message: "Missing last restart reason."
+      - type: not_contains_regex
+        pattern: 'Last Restart Reason\s*:\s*(?!User request|None|N/A|Not Available|Unknown)\S'
+        failure_message: "Last restart reason indicates an abnormal restart — expected 'User request'."
       - type: print_info_fields
         fields:
           - label: "System Uptime"
