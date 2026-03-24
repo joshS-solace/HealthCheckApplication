@@ -23,6 +23,23 @@ rules:
     checks:
       - type: supported_version_check
         lifecycle:
+          - version: "10.0.1"
+            end_of_full_support: "2025-06-21"
+            end_of_technical_support: "2025-06-21"
+            release_type: "LTS"
+
+          - version: "10.1.1"
+            end_of_full_support: "2023-09-15"
+            end_of_technical_support: "2025-09-15"
+
+          - version: "10.2.1"
+            end_of_full_support: "2023-12-15"
+            end_of_technical_support: "2025-12-15"
+
+          - version: "10.3.1"
+            end_of_full_support: "2024-03-15"
+            end_of_technical_support: "2026-03-15"
+
           - version: "10.4.1"
             end_of_full_support: "2026-06-15"
             end_of_technical_support: "2026-06-15"
@@ -70,6 +87,107 @@ rules:
           - version: "10.25.0"
             end_of_full_support: "2027-06-30"
             end_of_technical_support: "2027-06-30"
+            release_type: "LTS"
+
+          - version: "10.25.1"
+            end_of_full_support: "2025-07-08"
+            end_of_technical_support: "2027-07-08"
+
+          - version: "10.25.2"
+            end_of_full_support: "2025-07-22"
+            end_of_technical_support: "2027-07-22"
+
+          - version: "10.25.3"
+            end_of_full_support: "2025-08-06"
+            end_of_technical_support: "2027-08-06"
+
+          - version: "10.25.4"
+            end_of_full_support: "2025-08-19"
+            end_of_technical_support: "2027-08-19"
+
+          - version: "10.25.5"
+            end_of_full_support: "2025-09-02"
+            end_of_technical_support: "2027-09-02"
+
+          - version: "10.25.6"
+            end_of_full_support: "2025-09-16"
+            end_of_technical_support: "2027-09-16"
+
+          - version: "10.25.7"
+            end_of_full_support: "2025-09-30"
+            end_of_technical_support: "2027-09-30"
+
+          - version: "10.25.8"
+            end_of_full_support: "2025-10-14"
+            end_of_technical_support: "2027-10-14"
+
+          - version: "10.25.9"
+            end_of_full_support: "2025-10-28"
+            end_of_technical_support: "2027-10-28"
+
+          - version: "10.25.10"
+            end_of_full_support: "2025-11-11"
+            end_of_technical_support: "2027-11-11"
+
+          - version: "10.25.11"
+            end_of_full_support: "2025-11-25"
+            end_of_technical_support: "2027-11-25"
+
+          - version: "10.25.12"
+            end_of_full_support: "2025-12-10"
+            end_of_technical_support: "2027-12-10"
+
+          - version: "10.25.13"
+            end_of_full_support: "2026-01-07"
+            end_of_technical_support: "2028-01-07"
+
+          - version: "10.25.14"
+            end_of_full_support: "2026-01-24"
+            end_of_technical_support: "2028-01-24"
+
+          - version: "10.25.15"
+            end_of_full_support: "2026-02-03"
+            end_of_technical_support: "2028-02-03"
+
+          - version: "10.25.16"
+            end_of_full_support: "2026-02-17"
+            end_of_technical_support: "2028-02-17"
+
+          - version: "10.25.17"
+            end_of_full_support: "2026-03-03"
+            end_of_technical_support: "2028-03-03"
+
+          - version: "10.25.18"
+            end_of_full_support: "2026-03-17"
+            end_of_technical_support: "2028-03-17"
+
+          - version: "10.25.19"
+            end_of_full_support: "2026-03-31"
+            end_of_technical_support: "2028-03-31"
+
+          - version: "10.25.20"
+            end_of_full_support: "2026-04-14"
+            end_of_technical_support: "2028-04-14"
+
+          - version: "10.25.21"
+            end_of_full_support: "2026-04-28"
+            end_of_technical_support: "2028-04-28"
+
+          - version: "10.25.22"
+            end_of_full_support: "2026-05-12"
+            end_of_technical_support: "2028-05-12"
+
+          - version: "10.25.23"
+            end_of_full_support: "2026-05-26"
+            end_of_technical_support: "2028-05-26"
+
+          - version: "10.25.24"
+            end_of_full_support: "2026-06-09"
+            end_of_technical_support: "2028-06-09"
+
+          - version: "10.26.0"
+            end_of_full_support: "2026-06-30"
+            end_of_technical_support: "2028-06-30"
             release_type: "LTS"
 
         failure_message: "Installed SolOS release is out of support."

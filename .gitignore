@@ -2,7 +2,6 @@
 test_gds/
 
 # Generated output files
-support-health-check/scripts/data/
 
 # Archive files
 *.tgz
@@ -16,7 +15,8 @@ __pycache__/
 .venv/
 venv/
 
-# Claude — exclude session/state data but track plugins
+# Claude — exclude session/state data and local settings but track plugins
 .claude/projects/
 .claude/todos/
 .claude/settings.local.json
+.claude/settings.json

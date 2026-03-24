@@ -103,7 +103,7 @@ def extract_command_output(diagnostics: str, command: str) -> str:
     m = re.search(pat_b, diagnostics, re.DOTALL | re.IGNORECASE)
     if m:
         return m.group(1).strip()
-    return diagnostics
+    return ""
 
 
 def _parse_redundancy_group(output: str) -> list:

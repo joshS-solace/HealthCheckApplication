@@ -1,6 +1,6 @@
 # support-health-check
 
-A Claude Code plugin for running Solace broker health checks from gather-diagnostics/gather-diagnostics-host bundles. Supports both **appliance** and **software broker** (VMR/Cloud) deployments.
+A Claude Code plugin for running Solace broker health checks from gather-diagnostics/gather-diagnostics-host bundles. Supports both appliance and software broker deployments.
 
 ## Installation
 
@@ -37,7 +37,12 @@ The plugin runs Python scripts on your behalf. To avoid approval prompts on ever
   "permissions": {
     "allow": [
       "Bash(python *)",
-      "Bash(python3 *)"
+      "Bash(python3 *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "mcp__atlassian__searchAtlassian",
+      "mcp__atlassian__getConfluencePage",
+      "mcp__atlassian__getJiraIssue"
     ]
   }
 }

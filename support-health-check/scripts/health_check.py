@@ -488,7 +488,7 @@ def run_troubleshooting_steps(section: str, logs: dict, reference_date: datetime
 # Individual check execution
 # ---------------------------------------------------------------------------
 
-def run_check(check: dict, content: str, section: str, source_label: str, reference_date: datetime.date = None) -> list:
+def run_check(check: dict, content: str, section: str, source_label: str, reference_date: datetime.date = None, seen_matches: set = None) -> list:
     """
     Execute a single check dict against content.
     Returns a list of failure dicts: {"message": str, "matches": list[dict]}.
@@ -498,8 +498,8 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
     failures = []
     check_type = check["type"]
 
-    def fail(message, matches=None):
-        failures.append({"message": message, "matches": matches or []})
+    def fail(message, matches=None, skip_kba=False):
+        failures.append({"message": message, "matches": matches or [], "skip_kba": skip_kba})
 
     if check_type == "supported_version_check":
         lifecycle = check.get("lifecycle", [])
@@ -514,7 +514,7 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
             fail("Could not determine installed SolOS version from diagnostics.")
         else:
             installed = ver_match.group(1)
-            entry = next((e for e in lifecycle if installed.startswith(e["version"])), None)
+            entry = next((e for e in lifecycle if installed.startswith(e["version"] + ".") or installed == e["version"]), None)
             if not entry:
                 fail(f"SolOS {installed} is not in the known supported versions list.")
             else:
@@ -538,30 +538,22 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
                         f"until {eof_s.strftime('%B %d, %Y')}."
                     )
 
-    elif check_type == "supported_chassis_check":
-        lifecycle = check.get("lifecycle", [])
-        today = datetime.date.today()
+    elif check_type == "eol_chassis_check":
+        eol_list = check.get("eol", [])
 
         prod_match = re.search(r"Chassis Product #:\s*([A-Z0-9][A-Z0-9\-]+)", content, re.IGNORECASE)
         if not prod_match:
             fail("Could not determine chassis product number from diagnostics.")
         else:
             product = prod_match.group(1).strip()
-            entry = next((e for e in lifecycle if e["product_number"] == product), None)
-            if not entry:
-                fail(f"Chassis {product} is not in the supported products list.")
+            entry = next((e for e in eol_list if e["product_number"] == product), None)
+            if entry:
+                fail(
+                    f"Chassis {product} is end of life -- "
+                    f"end of support was {entry['end_of_support']}."
+                )
             else:
-                eos = datetime.date.fromisoformat(entry["end_of_support"])
-                if today > eos:
-                    fail(
-                        f"Chassis {product} is out of support -- "
-                        f"end of support was {eos.strftime('%B %d, %Y')}."
-                    )
-                else:
-                    print(
-                        f"    [INFO] Chassis {product} is supported "
-                        f"until {eos.strftime('%B %d, %Y')}."
-                    )
+                print(f"    [INFO] Chassis {product} is supported.")
 
     elif check_type == "hba_status_check":
         if not re.search(r"Link State:", content, re.IGNORECASE):
@@ -700,6 +692,18 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
         if re.search(check["pattern"], content, re.IGNORECASE):
             fail(check["failure_message"])
 
+    elif check_type == "ntp_reachability_check":
+        server_m = re.search(r"NTP Server\s*:\s*(\S.*)?", content, re.IGNORECASE)
+        server = (server_m.group(1) or "").strip() if server_m else ""
+        if not server or server == "0.0.0.0":
+            for label in ("Protocol", "Enabled", "NTP Server", "NTP Reachable"):
+                m = re.search(rf"{label}\s*:\s*(.+)", content, re.IGNORECASE)
+                val = m.group(1).strip() if m else "(not found)"
+                print(f"  [INFO] {label}: {val}")
+            fail("NTP server is not configured.", skip_kba=True)
+        elif not re.search(r"NTP Reachable\s*:\s*Yes", content, re.IGNORECASE):
+            fail("NTP server is not reachable.")
+
     elif check_type == "log_grep_absent":
         patterns = check.get("patterns", [])
         exclude_patterns = check.get("exclude_patterns", [])
@@ -723,9 +727,15 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
             for line in found_lines:
                 timestamp = extract_log_timestamp(line) or "unknown time"
                 message = extract_log_message(line)
+                dedup_key = (timestamp, message)
+                if seen_matches is not None:
+                    if dedup_key in seen_matches:
+                        continue
+                    seen_matches.add(dedup_key)
                 matches.append({"source": source_label, "timestamp": timestamp, "line": line, "message": message})
                 print(f"    [GREP MATCH] Source: {source_label} | Time: {timestamp} {message}")
-            fail(f"{check['failure_message']} (source: {source_label})", matches)
+            if matches:
+                fail(f"{check['failure_message']} (source: {source_label})", matches)
 
     elif check_type == "log_paired_events":
         patterns = check.get("patterns", [])
@@ -800,9 +810,15 @@ def run_check(check: dict, content: str, section: str, source_label: str, refere
             for line in failing:
                 timestamp = extract_log_timestamp(line) or "unknown time"
                 message = extract_log_message(line)
+                dedup_key = (timestamp, message)
+                if seen_matches is not None:
+                    if dedup_key in seen_matches:
+                        continue
+                    seen_matches.add(dedup_key)
                 matches.append({"source": source_label, "timestamp": timestamp, "line": line, "message": message})
                 print(f"    [GREP MATCH] Source: {source_label} | Time: {timestamp} {message}")
-            fail(f"{check['failure_message']} (source: {source_label})", matches)
+            if matches:
+                fail(f"{check['failure_message']} (source: {source_label})", matches)
 
     return failures
 
@@ -883,6 +899,7 @@ def run_section(rule: dict, diagnostics: str, logs: dict, reference_date: dateti
             print(f"  [INFO] Analyzing log data from {cutoff} to {reference_date} ({max_age_days}-day window)")
 
     all_failures = []
+    seen_matches: set = set()
 
     for source in expanded_sources:
         # Resolve content for this source
@@ -901,7 +918,7 @@ def run_section(rule: dict, diagnostics: str, logs: dict, reference_date: dateti
             continue
 
         for check in rule.get("checks", []):
-            failures = run_check(check, content, section, source, reference_date)
+            failures = run_check(check, content, section, source, reference_date, seen_matches=seen_matches)
             all_failures.extend(failures)
 
     return len(all_failures) == 0, all_failures
@@ -1026,6 +1043,7 @@ def run(folder: Path, router_name: str = None, output_dir: Path = None) -> bool:
                 "description": rule.get("description", ""),
                 "status": "PASS" if passed else "FAIL",
                 "failures": failures,
+                "skip_kba": section in ("1.1", "1.2") or any(f.get("skip_kba") for f in failures),
             }
             if not passed:
                 ctx = []
@@ -1093,7 +1111,7 @@ def run(folder: Path, router_name: str = None, output_dir: Path = None) -> bool:
                     for failure in failures:
                         print(f"    [FAIL] {failure['message']}")
                     all_failures.extend([
-                        {"message": f"[{rule['section']}] {failure['message']}", "matches": failure["matches"]}
+                        {"message": f"[{rule['section']}] {failure['message']}", "matches": failure["matches"], "skip_kba": failure.get("skip_kba", False)}
                         for failure in failures
                     ])
                 group_result = {
@@ -1101,6 +1119,7 @@ def run(folder: Path, router_name: str = None, output_dir: Path = None) -> bool:
                     "description": group_desc,
                     "status": "FAIL",
                     "failures": all_failures,
+                    "skip_kba": any(f.get("skip_kba") for f in all_failures),
                 }
                 ctx = []
                 if group_key in troubleshooting_rules:

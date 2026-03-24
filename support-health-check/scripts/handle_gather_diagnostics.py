@@ -102,14 +102,24 @@ def extract(tgz_path: Path) -> Path:
 
     try:
         with tarfile.open(tgz_path, "r:*") as tar:
+            top_names = {m.name.split("/")[0] for m in tar.getmembers() if m.name and m.name != "."}
             tar.extractall(dest)
     except Exception as e:
         print(f"[ERROR] Extraction failed: {e}")
         sys.exit(1)
 
-    # Return the extracted item (folder or file) — strip .tgz extension
-    extracted = strip_extensions(tgz_path)
-    return extracted if extracted.exists() else dest
+    # Prefer exact strip_extensions match (common case)
+    expected = strip_extensions(tgz_path)
+    if expected.exists():
+        return expected
+
+    # Fall back to inspecting what was actually at the top level of the archive
+    top_items = [dest / name for name in top_names if (dest / name).exists()]
+    if len(top_items) == 1:
+        return top_items[0]
+
+    # Multiple or unknown top-level items — return dest as container
+    return dest
 
 
 # ---------------------------------------------------------------------------
@@ -166,32 +176,36 @@ def handle(arg: str) -> str | None:
 def auto_discover_gd(search_dir: Path) -> list[str]:
     """
     Auto-discover gather-diagnostics artifacts in a directory.
-    Looks for .tgz.p7m files, .tgz files, and already-extracted folders.
-    Returns deduplicated list of paths (one per base name, preferring the
-    most-raw form: .tgz.p7m > .tgz > folder).
+    Mirrors the full set of formats that resolve() handles, in priority order:
+    .tgz.p7m.tgz > .tgz.p7m > .tgz / .tar.gz / .tar > extracted folder.
+    Returns a deduplicated list (one entry per base name, most-raw form wins).
     """
     candidates = {}  # base_name -> (priority, path)
-    for p in search_dir.glob("gather-diagnostics*.tgz.p7m"):
+    for p in search_dir.glob("gather-diagnostics*.tgz.p7m.tgz"):
         base = strip_extensions(p).name
         candidates[base] = (0, str(p))
+    for p in search_dir.glob("gather-diagnostics*.tgz.p7m"):
+        base = strip_extensions(p).name
+        if base not in candidates:
+            candidates[base] = (1, str(p))
     for p in search_dir.glob("gather-diagnostics*.tgz"):
         base = strip_extensions(p).name
         if base not in candidates:
-            candidates[base] = (1, str(p))
+            candidates[base] = (2, str(p))
     for p in search_dir.glob("gather-diagnostics*.tar.gz"):
         base = strip_extensions(p).name
         if base not in candidates:
-            candidates[base] = (1, str(p))
+            candidates[base] = (2, str(p))
     for p in search_dir.glob("gather-diagnostics*.tar"):
-        if not p.name.endswith(".tar.gz"):   # .tar glob won't match .tar.gz, but be explicit
+        if not p.name.endswith(".tar.gz"):
             base = strip_extensions(p).name
             if base not in candidates:
-                candidates[base] = (1, str(p))
+                candidates[base] = (2, str(p))
     for p in search_dir.iterdir():
         if p.is_dir() and p.name.startswith("gather-diagnostics"):
             base = strip_extensions(p).name
             if base not in candidates:
-                candidates[base] = (2, str(p))
+                candidates[base] = (3, str(p))
     return [path for _, (_, path) in sorted(candidates.items())]
 
 
